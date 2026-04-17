@@ -136,7 +136,7 @@ Label convention: `0` = safe prompt (should not be refused), `1` = harmful promp
 ## Repository structure
 
 ```
-overrefusal-unified/
+overrefusal-in-posttraining/
 ├── run_experiment.py       # Step 1: generate traces
 ├── run_judge.py            # Step 2: judge responses (3-class)
 ├── plot_results.py         # Plotting (keyword + judge)
