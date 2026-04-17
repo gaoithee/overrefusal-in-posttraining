@@ -1,0 +1,21 @@
+# Core ML / generation
+torch>=2.0
+transformers>=4.40,<4.47
+accelerate>=0.27
+datasets>=2.18
+ai2-olmo>=0.4.0          # required for OLMo 1 / 2 models
+
+# Data
+pandas>=2.0
+numpy>=1.24
+
+# API judge back-end (optional — needed only when JUDGE_API_KEY is set)
+openai>=1.0
+python-dotenv>=1.0
+
+# Plotting
+matplotlib>=3.8
+seaborn>=0.13
+
+# Utilities
+tqdm>=4.66
