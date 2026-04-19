@@ -35,7 +35,6 @@ from typing import Literal
 import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import normalize
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -225,10 +224,11 @@ def fit_direction(
     if method == "mean_diff":
         v = X_pos.mean(0) - X_neg.mean(0)
         v = v / (np.linalg.norm(v) + 1e-12)
-        # accuracy: sign of projection
+        # threshold = midpoint of projected class means (correct for any class balance)
+        threshold = ((X_pos @ v).mean() + (X_neg @ v).mean()) / 2.0
         scores = np.concatenate([X_pos @ v, X_neg @ v])
         labels = np.array([1] * len(X_pos) + [0] * len(X_neg))
-        preds  = (scores > scores.mean()).astype(int)
+        preds  = (scores > threshold).astype(int)
         acc    = (preds == labels).mean()
         return v, float(acc)
 
