@@ -59,6 +59,35 @@ def run_generation(model, prompts: list[str], batch_size: int = 8) -> list[str]:
     return responses
 
 
+def _safe_merge(existing: pd.DataFrame, raw_df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Concatenate existing and new rows, deduplicating where possible.
+
+    Returns (merged_df, n_added).
+
+    The original code called drop_duplicates(subset=dedup_cols) where
+    dedup_cols could be an empty list if none of the three key columns
+    existed in both DataFrames.  pandas raises ValueError on
+    drop_duplicates(subset=[]), crashing the run and losing all newly
+    generated responses.  This function guards against that case by
+    skipping deduplication when no key columns are available.
+    """
+    before = len(existing)
+    dedup_cols = [c for c in ["prompt", "checkpoint", "source"]
+                  if c in existing.columns and c in raw_df.columns]
+    combined = pd.concat([existing, raw_df], ignore_index=True)
+    if dedup_cols:
+        combined = combined.drop_duplicates(subset=dedup_cols, keep="first")
+    else:
+        logger.warning(
+            "No dedup columns found in common between existing CSV and new results "
+            "(%s). Skipping deduplication — manual review may be needed.",
+            list(existing.columns),
+        )
+    added = len(combined) - before
+    return combined, added
+
+
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
@@ -90,7 +119,6 @@ def compute_and_save_metrics(raw_df: pd.DataFrame, results_dir: str) -> None:
         m_src = compute_metrics(grp)
         save_metrics(m_src, os.path.join(results_dir, f"metrics_{source}.csv"))
 
-        # Determine dominant label to choose the right title
         n_safe    = (grp["label"] == 0).sum()
         n_harmful = (grp["label"] == 1).sum()
         if n_harmful == 0:
@@ -196,16 +224,15 @@ def main(args):
     # ── 7. Save (merge with existing, never overwrite) ─────────────────────
     raw_path = os.path.join(cfg.RESULTS_DIR, "raw_results.csv")
     if os.path.exists(raw_path):
-        existing   = pd.read_csv(raw_path)
-        before     = len(existing)
-        dedup_cols = [c for c in ["prompt", "checkpoint", "source"]
-                      if c in existing.columns and c in raw_df.columns]
-        combined   = pd.concat([existing, raw_df], ignore_index=True)
-        combined   = combined.drop_duplicates(subset=dedup_cols, keep="first")
-        added      = len(combined) - before
+        existing         = pd.read_csv(raw_path)
+        before           = len(existing)
+        combined, added  = _safe_merge(existing, raw_df)
+        skipped          = len(raw_df) - added
         combined.to_csv(raw_path, index=False)
-        logger.info("Merged: %d existing + %d new → %d total (%d duplicates skipped)",
-                    before, len(raw_df), len(combined), len(raw_df) - added)
+        logger.info(
+            "Merged: %d existing + %d new → %d total (%d duplicates skipped)",
+            before, len(raw_df), len(combined), skipped,
+        )
         raw_df = combined
     else:
         raw_df.to_csv(raw_path, index=False)
