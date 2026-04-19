@@ -1,418 +1,489 @@
 """
-analysis/representation_analysis.py
+run_representation_analysis.py
 
-Core module for studying the geometry of refusal and over-refusal directions
-in the hidden representations of language models.
+CLI entry point for Experiments 1, 2, 3:
 
-For each layer l, given:
-  - a set of harmful prompts   (label=1, *should* be refused)
-  - a set of over-refusal prompts (label=0, *should not* be refused but are)
+  Exp 1 — Entanglement as proxy for over-refusal:
+        Compute per-layer entanglement (v_ref · v_over) and boundary margin
+        for a single model checkpoint and correlate with behavioural metrics.
 
-We:
-  1. Extract hidden states h at a chosen token position (last token by default).
-  2. Fit a linear probe (logistic regression or mean-diff) to get:
-        v_ref  — direction discriminating harmful vs. safe
-        v_over — direction discriminating over-refused vs. complied-safe
-  3. Decompose:
-        v_over_perp = v_over - (v_over · v_ref) * v_ref
-  4. Compute:
-        entanglement(l) = cos(v_ref, v_over)  ∈ [-1, 1]
-        boundary_margin(l) = mean signed distance of over-refusal samples from
-                             the refusal boundary (positive → wrong side)
+  Exp 2 — Entanglement evolution during post-training:
+        Sweep over all checkpoints listed in a config file (base→SFT→DPO→
+        Instruct) and track how entanglement changes at each training stage.
+
+  Exp 3 — System prompt influence:
+        For each checkpoint, compare entanglement under different system prompts.
 
 Usage
 -----
-See run_representation_analysis.py for the CLI entry point.
+# Exp 1: single checkpoint
+python run_representation_analysis.py \
+    --config config_olmo2 \
+    --experiment entanglement \
+    --checkpoint sft__none \
+    --n-samples 200
+
+# Exp 2: all checkpoints, fixed system prompt
+python run_representation_analysis.py \
+    --config config_olmo2 \
+    --experiment evolution \
+    --system-prompt none \
+    --n-samples 200
+
+# Exp 3: system prompt sweep, all checkpoints
+python run_representation_analysis.py \
+    --config config_olmo2 \
+    --experiment system_prompt \
+    --n-samples 200
+
+Results land in results/<model>/geometry/ as .npz files and a summary CSV.
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
+import importlib
 import logging
-from dataclasses import dataclass, field
+import sys
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
+import pandas as pd
 import torch
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import normalize
-from tqdm import tqdm
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from analysis.representation_analysis import (
+    CheckpointGeometry,
+    compute_checkpoint_geometry,
+    entanglement_table,
+    extract_hidden_states,
+    load_geometry,
+    save_geometry,
+)
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Data structures
+# Helpers
 # ---------------------------------------------------------------------------
 
-@dataclass
-class LayerGeometry:
-    """Geometric quantities computed for a single layer."""
-    layer: int
-    v_ref: np.ndarray          # unit refusal direction  (d,)
-    v_over: np.ndarray         # unit over-refusal direction (d,)
-    v_over_perp: np.ndarray    # component of v_over orthogonal to v_ref (d,)
-    entanglement: float        # cos(v_ref, v_over)  ∈ [-1, 1]
-    boundary_margin: float     # mean signed distance of over-refused samples
-                               # from the refusal decision boundary
-    probe_ref_acc: float       # accuracy of the refusal probe
-    probe_over_acc: float      # accuracy of the over-refusal probe
+def _load_config(config_name: str):
+    """Import a config_*.py module by name and return it."""
+    mod = importlib.import_module(config_name)
+    return mod
 
 
-@dataclass
-class CheckpointGeometry:
-    """Full geometry analysis for one model checkpoint."""
-    checkpoint_tag: str
-    system_prompt: str
-    layers: list[LayerGeometry] = field(default_factory=list)
+def _sample_prompts(
+    dataset_key: str,
+    label: int,
+    n: int,
+    seed: int = 42,
+) -> list[str]:
+    """
+    Sample n prompts with the given label from a registered dataset.
 
-    # convenience accessors ------------------------------------------------
-    @property
-    def entanglement_curve(self) -> np.ndarray:
-        return np.array([lg.entanglement for lg in self.layers])
-
-    @property
-    def margin_curve(self) -> np.ndarray:
-        return np.array([lg.boundary_margin for lg in self.layers])
-
-    @property
-    def layer_indices(self) -> list[int]:
-        return [lg.layer for lg in self.layers]
-
-
-# ---------------------------------------------------------------------------
-# Hidden-state extraction
-# ---------------------------------------------------------------------------
-
-def _format_prompt(
-    prompt: str,
-    system_prompt: str | None,
-    tokenizer,
-) -> str:
-    """Apply chat template if available, otherwise concatenate naively."""
-    if system_prompt and hasattr(tokenizer, "apply_chat_template"):
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": prompt},
-        ]
-        try:
-            return tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        except Exception:
-            pass
-    return (f"<|system|>\n{system_prompt}\n" if system_prompt else "") + prompt
+    Datasets expected to have 'prompt' and 'label' columns (same convention
+    as the rest of the repo).  Adjust field names below if needed.
+    """
+    from data.dataset_loader import load_dataset_by_key  # repo-internal
+    df = load_dataset_by_key(dataset_key)
+    subset = df[df["label"] == label]
+    if len(subset) < n:
+        logger.warning(
+            "Only %d samples with label=%d in %s (requested %d)",
+            len(subset), label, dataset_key, n,
+        )
+    return subset["prompt"].sample(min(n, len(subset)), random_state=seed).tolist()
 
 
-@torch.no_grad()
-def extract_hidden_states(
-    prompts: list[str],
+def _build_prompt_sets(
+    n_samples: int,
+    seed: int = 42,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Return (harmful_prompts, safe_prompts, over_refusal_prompts).
+
+    harmful      → from harmbench/jailbreakbench (label=1)
+    safe         → from or_bench/false_reject    (label=0, clearly safe)
+    over_refusal → also label=0 but typically over-refused
+                   (we use or_bench which is specifically designed for this)
+    """
+    n = n_samples // 2  # half from each source for balance
+
+    harmful_prompts = (
+        _sample_prompts("harmbench",      label=1, n=n, seed=seed)
+        + _sample_prompts("jailbreakbench", label=1, n=n, seed=seed)
+    )
+    safe_prompts = _sample_prompts("wildguard", label=0, n=n_samples, seed=seed)
+    over_refusal_prompts = (
+        _sample_prompts("or_bench",    label=0, n=n, seed=seed)
+        + _sample_prompts("false_reject", label=0, n=n, seed=seed)
+    )
+    return harmful_prompts, safe_prompts, over_refusal_prompts
+
+
+def _load_model_and_tokenizer(model_name_or_path: str, device: str):
+    logger.info("Loading model %s ...", model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name_or_path,
+        torch_dtype=torch.bfloat16,
+        device_map=device,
+        output_hidden_states=True,
+        trust_remote_code=True,
+    )
+    model.eval()
+    return model, tokenizer
+
+
+def _extract_all(
+    prompts_harm: list[str],
+    prompts_safe: list[str],
+    prompts_over: list[str],
     model,
     tokenizer,
-    system_prompt: str | None = None,
-    layers: list[int] | None = None,
-    token_position: Literal["last", "first", "mean"] = "last",
-    batch_size: int = 8,
-    device: str | None = None,
-    max_length: int = 512,
-) -> dict[int, np.ndarray]:
-    """
-    Extract hidden states from `model` for each prompt.
-
-    Parameters
-    ----------
-    prompts:
-        List of N input strings.
-    model:
-        HuggingFace CausalLM with output_hidden_states support.
-    tokenizer:
-        Matching tokenizer.
-    system_prompt:
-        Optional system prompt prepended to every input.
-    layers:
-        Which transformer layers to collect (0 = embedding).
-        If None, collects all layers.
-    token_position:
-        Which token position to read the hidden state from:
-        "last"  → last non-padding token  (default)
-        "first" → first token (BOS / prompt start)
-        "mean"  → mean over all non-padding tokens
-    batch_size:
-        Number of prompts per forward pass.
-    device:
-        Torch device string.  Defaults to model's device.
-    max_length:
-        Tokenizer truncation length.
-
-    Returns
-    -------
-    dict  layer_idx -> np.ndarray of shape (N, hidden_dim)
-    """
-    if device is None:
-        device = next(model.parameters()).device
-
-    num_layers = model.config.num_hidden_layers
-    if layers is None:
-        layers = list(range(num_layers + 1))   # +1 for embedding layer
-
-    # initialise storage
-    storage: dict[int, list[np.ndarray]] = {l: [] for l in layers}
-
-    formatted = [
-        _format_prompt(p, system_prompt, tokenizer) for p in prompts
-    ]
-
-    for start in tqdm(range(0, len(formatted), batch_size), desc="Extracting"):
-        batch_texts = formatted[start : start + batch_size]
-        enc = tokenizer(
-            batch_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-        ).to(device)
-
-        out = model(
-            **enc,
-            output_hidden_states=True,
-            use_cache=False,
-        )
-        # out.hidden_states: tuple of (num_layers+1) tensors (B, T, D)
-        attention_mask = enc["attention_mask"]
-
-        for layer_idx in layers:
-            hs = out.hidden_states[layer_idx]  # (B, T, D)
-
-            if token_position == "last":
-                # index of last real token for each item
-                seq_lens = attention_mask.sum(dim=1) - 1  # (B,)
-                vecs = hs[
-                    torch.arange(hs.size(0), device=device), seq_lens
-                ]  # (B, D)
-            elif token_position == "first":
-                vecs = hs[:, 0, :]
-            elif token_position == "mean":
-                mask_f = attention_mask.unsqueeze(-1).float()
-                vecs = (hs * mask_f).sum(1) / mask_f.sum(1)
-            else:
-                raise ValueError(f"Unknown token_position: {token_position}")
-
-            storage[layer_idx].append(vecs.float().cpu().numpy())
-
-    return {l: np.concatenate(storage[l], axis=0) for l in layers}
-
-
-# ---------------------------------------------------------------------------
-# Direction fitting
-# ---------------------------------------------------------------------------
-
-ProbeMethod = Literal["mean_diff", "logistic"]
-
-
-def fit_direction(
-    X_pos: np.ndarray,
-    X_neg: np.ndarray,
-    method: ProbeMethod = "logistic",
-) -> tuple[np.ndarray, float]:
-    """
-    Fit a linear probe to separate positive from negative samples.
-
-    Returns
-    -------
-    v : np.ndarray (d,)   Unit-normalised weight vector.
-    acc : float           Train accuracy.
-    """
-    if method == "mean_diff":
-        v = X_pos.mean(0) - X_neg.mean(0)
-        v = v / (np.linalg.norm(v) + 1e-12)
-        # accuracy: sign of projection
-        scores = np.concatenate([X_pos @ v, X_neg @ v])
-        labels = np.array([1] * len(X_pos) + [0] * len(X_neg))
-        preds  = (scores > scores.mean()).astype(int)
-        acc    = (preds == labels).mean()
-        return v, float(acc)
-
-    elif method == "logistic":
-        X = np.concatenate([X_pos, X_neg])
-        y = np.array([1] * len(X_pos) + [0] * len(X_neg))
-        clf = LogisticRegression(
-            max_iter=1000, C=0.1, fit_intercept=True, random_state=0
-        )
-        clf.fit(X, y)
-        v   = clf.coef_[0]
-        v   = v / (np.linalg.norm(v) + 1e-12)
-        acc = clf.score(X, y)
-        return v, float(acc)
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-
-# ---------------------------------------------------------------------------
-# Core geometry computation
-# ---------------------------------------------------------------------------
-
-def compute_layer_geometry(
-    layer: int,
-    hidden_harmful: np.ndarray,    # (N_harm, D) — harmful (should refuse)
-    hidden_safe: np.ndarray,       # (N_safe, D) — clearly safe (complied)
-    hidden_over: np.ndarray,       # (N_over, D) — over-refused (false positives)
-    method: ProbeMethod = "logistic",
-) -> LayerGeometry:
-    """
-    Compute refusal/over-refusal directions and entanglement for one layer.
-
-    Parameters
-    ----------
-    hidden_harmful:
-        Hidden states for prompts that the model correctly refuses.
-    hidden_safe:
-        Hidden states for prompts that the model correctly answers.
-    hidden_over:
-        Hidden states for prompts that the model refuses but shouldn't
-        (the over-refusal / false positive set).
-    """
-    # --- refusal direction: harmful vs safe ---------------------------------
-    v_ref, acc_ref = fit_direction(hidden_harmful, hidden_safe, method)
-
-    # --- over-refusal direction: over-refused vs safe -----------------------
-    # We treat over-refused as "positive" and safe as "negative"
-    # so that v_over points toward the over-refusal region
-    v_over, acc_over = fit_direction(hidden_over, hidden_safe, method)
-
-    # --- orthogonal decomposition -------------------------------------------
-    dot = float(np.dot(v_ref, v_over))   # this IS the cosine (both unit)
-    v_over_perp = v_over - dot * v_ref
-    norm_perp   = np.linalg.norm(v_over_perp)
-    if norm_perp > 1e-12:
-        v_over_perp = v_over_perp / norm_perp
-
-    # --- boundary margin for over-refusal samples ---------------------------
-    # Project over-refusal hidden states onto v_ref
-    # Positive values → on the "harmful/refuse" side of the boundary
-    proj_over   = hidden_over   @ v_ref
-    proj_safe   = hidden_safe   @ v_ref
-    proj_harm   = hidden_harmful @ v_ref
-
-    # Centre at the midpoint between harmful and safe means
-    midpoint    = (proj_harm.mean() + proj_safe.mean()) / 2.0
-    boundary_margin = float((proj_over - midpoint).mean())
-
-    return LayerGeometry(
-        layer=layer,
-        v_ref=v_ref,
-        v_over=v_over,
-        v_over_perp=v_over_perp,
-        entanglement=dot,
-        boundary_margin=boundary_margin,
-        probe_ref_acc=acc_ref,
-        probe_over_acc=acc_over,
+    system_prompt: str | None,
+    layers: list[int],
+    batch_size: int,
+    device: str,
+    token_position: str,
+) -> tuple[dict, dict, dict]:
+    kwargs = dict(
+        model=model,
+        tokenizer=tokenizer,
+        system_prompt=system_prompt,
+        layers=layers,
+        batch_size=batch_size,
+        device=device,
+        token_position=token_position,
     )
+    h_harm = extract_hidden_states(prompts_harm, **kwargs)
+    h_safe = extract_hidden_states(prompts_safe, **kwargs)
+    h_over = extract_hidden_states(prompts_over, **kwargs)
+    return h_harm, h_safe, h_over
 
 
-def compute_checkpoint_geometry(
+def _geometry_cache_path(results_dir: Path, checkpoint_tag: str, system_prompt_key: str) -> Path:
+    safe_tag = checkpoint_tag.replace("/", "_").replace(" ", "_")
+    return results_dir / "geometry" / f"{safe_tag}__{system_prompt_key}.npz"
+
+
+def _save_summary_csv(geometries: list[CheckpointGeometry], out_path: Path) -> None:
+    """Write a flat CSV with one row per (checkpoint, layer)."""
+    rows = []
+    for g in geometries:
+        for lg in g.layers:
+            rows.append({
+                "checkpoint":       g.checkpoint_tag,
+                "system_prompt":    g.system_prompt,
+                "layer":            lg.layer,
+                "entanglement":     lg.entanglement,
+                "boundary_margin":  lg.boundary_margin,
+                "probe_ref_acc":    lg.probe_ref_acc,
+                "probe_over_acc":   lg.probe_over_acc,
+            })
+    pd.DataFrame(rows).to_csv(out_path, index=False)
+    logger.info("Summary CSV saved to %s", out_path)
+
+
+# ---------------------------------------------------------------------------
+# Experiment runners
+# ---------------------------------------------------------------------------
+
+def run_entanglement(args, cfg) -> None:
+    """Exp 1: analyse a single checkpoint, correlate with I/O metrics."""
+    checkpoint_tag  = args.checkpoint
+    system_prompt_key = args.system_prompt
+
+    # Resolve checkpoint → model path using config
+    checkpoints_map: dict[str, str] = {
+        c["tag"]: c["model"] for c in cfg.CHECKPOINTS
+    }
+    if checkpoint_tag not in checkpoints_map:
+        raise ValueError(
+            f"Checkpoint '{checkpoint_tag}' not found in config. "
+            f"Available: {list(checkpoints_map)}"
+        )
+    model_path = checkpoints_map[checkpoint_tag]
+
+    system_prompts_map: dict[str, str | None] = cfg.SYSTEM_PROMPTS
+    system_prompt = system_prompts_map.get(system_prompt_key)
+
+    results_dir = Path("results") / cfg.MODEL_KEY
+    cache_path  = _geometry_cache_path(results_dir, checkpoint_tag, system_prompt_key)
+
+    if cache_path.exists() and not args.force:
+        logger.info("Loading cached geometry from %s", cache_path)
+        geom = load_geometry(cache_path)
+    else:
+        model, tokenizer = _load_model_and_tokenizer(model_path, args.device)
+        num_layers = model.config.num_hidden_layers
+        layers     = list(range(0, num_layers + 1, args.layer_stride))
+
+        prompts_harm, prompts_safe, prompts_over = _build_prompt_sets(
+            args.n_samples, seed=args.seed
+        )
+
+        h_harm, h_safe, h_over = _extract_all(
+            prompts_harm, prompts_safe, prompts_over,
+            model, tokenizer, system_prompt,
+            layers, args.batch_size, args.device, args.token_position,
+        )
+        del model  # free GPU memory
+
+        geom = compute_checkpoint_geometry(
+            checkpoint_tag=checkpoint_tag,
+            system_prompt_key=system_prompt_key,
+            hidden_harmful=h_harm,
+            hidden_safe=h_safe,
+            hidden_over=h_over,
+            method=args.probe_method,
+            layers=layers,
+        )
+        save_geometry(geom, cache_path)
+
+    # --- correlation with behavioural I/O metrics (if results CSV exists) ---
+    io_csv = results_dir / "raw_results.csv"
+    if io_csv.exists():
+        _correlate_with_io(geom, io_csv, checkpoint_tag, system_prompt_key, results_dir)
+    else:
+        logger.warning(
+            "No raw_results.csv found at %s. "
+            "Run run_experiment.py first for I/O correlation.",
+            io_csv,
+        )
+
+    _save_summary_csv([geom], results_dir / "geometry" / "summary_exp1.csv")
+    logger.info("Exp 1 done. Entanglement curve:\n%s", geom.entanglement_curve)
+
+
+def run_evolution(args, cfg) -> None:
+    """Exp 2: sweep all checkpoints and track entanglement over training."""
+    system_prompt_key = args.system_prompt
+    system_prompt     = cfg.SYSTEM_PROMPTS.get(system_prompt_key)
+    results_dir       = Path("results") / cfg.MODEL_KEY
+
+    geometries = []
+
+    for ckpt in cfg.CHECKPOINTS:
+        checkpoint_tag = ckpt["tag"]
+        model_path     = ckpt["model"]
+        cache_path     = _geometry_cache_path(results_dir, checkpoint_tag, system_prompt_key)
+
+        if cache_path.exists() and not args.force:
+            logger.info("[%s] Loading cached geometry", checkpoint_tag)
+            geom = load_geometry(cache_path)
+        else:
+            model, tokenizer = _load_model_and_tokenizer(model_path, args.device)
+            num_layers = model.config.num_hidden_layers
+            layers     = list(range(0, num_layers + 1, args.layer_stride))
+
+            prompts_harm, prompts_safe, prompts_over = _build_prompt_sets(
+                args.n_samples, seed=args.seed
+            )
+            h_harm, h_safe, h_over = _extract_all(
+                prompts_harm, prompts_safe, prompts_over,
+                model, tokenizer, system_prompt,
+                layers, args.batch_size, args.device, args.token_position,
+            )
+            del model
+
+            geom = compute_checkpoint_geometry(
+                checkpoint_tag=checkpoint_tag,
+                system_prompt_key=system_prompt_key,
+                hidden_harmful=h_harm,
+                hidden_safe=h_safe,
+                hidden_over=h_over,
+                method=args.probe_method,
+                layers=layers,
+            )
+            save_geometry(geom, cache_path)
+
+        geometries.append(geom)
+
+    _save_summary_csv(geometries, results_dir / "geometry" / "summary_exp2.csv")
+    logger.info("Exp 2 done. Saved %d checkpoint geometries.", len(geometries))
+
+    # Print mean entanglement per checkpoint (averaged over layers)
+    print("\n=== Mean entanglement across layers ===")
+    for g in geometries:
+        print(f"  {g.checkpoint_tag:30s}  {g.entanglement_curve.mean():.4f}")
+
+
+def run_system_prompt(args, cfg) -> None:
+    """Exp 3: compare entanglement across system prompts for all checkpoints."""
+    results_dir = Path("results") / cfg.MODEL_KEY
+    geometries  = []
+
+    for ckpt in cfg.CHECKPOINTS:
+        checkpoint_tag = ckpt["tag"]
+        model_path     = ckpt["model"]
+
+        # Load model once per checkpoint, sweep system prompts
+        model, tokenizer = None, None
+
+        for sp_key, system_prompt in cfg.SYSTEM_PROMPTS.items():
+            cache_path = _geometry_cache_path(results_dir, checkpoint_tag, sp_key)
+
+            if cache_path.exists() and not args.force:
+                logger.info("[%s | %s] Loading cached geometry", checkpoint_tag, sp_key)
+                geom = load_geometry(cache_path)
+            else:
+                if model is None:
+                    model, tokenizer = _load_model_and_tokenizer(model_path, args.device)
+                num_layers = model.config.num_hidden_layers
+                layers     = list(range(0, num_layers + 1, args.layer_stride))
+
+                prompts_harm, prompts_safe, prompts_over = _build_prompt_sets(
+                    args.n_samples, seed=args.seed
+                )
+                h_harm, h_safe, h_over = _extract_all(
+                    prompts_harm, prompts_safe, prompts_over,
+                    model, tokenizer, system_prompt,
+                    layers, args.batch_size, args.device, args.token_position,
+                )
+
+                geom = compute_checkpoint_geometry(
+                    checkpoint_tag=checkpoint_tag,
+                    system_prompt_key=sp_key,
+                    hidden_harmful=h_harm,
+                    hidden_safe=h_safe,
+                    hidden_over=h_over,
+                    method=args.probe_method,
+                    layers=layers,
+                )
+                save_geometry(geom, cache_path)
+
+            geometries.append(geom)
+
+        if model is not None:
+            del model  # free GPU after all system prompts for this checkpoint
+
+    _save_summary_csv(geometries, results_dir / "geometry" / "summary_exp3.csv")
+    logger.info("Exp 3 done. Saved %d (checkpoint × system_prompt) geometries.", len(geometries))
+
+
+# ---------------------------------------------------------------------------
+# Optional: correlate geometry with I/O over-refusal rate
+# ---------------------------------------------------------------------------
+
+def _correlate_with_io(
+    geom: CheckpointGeometry,
+    io_csv: Path,
     checkpoint_tag: str,
     system_prompt_key: str,
-    hidden_harmful: dict[int, np.ndarray],
-    hidden_safe:    dict[int, np.ndarray],
-    hidden_over:    dict[int, np.ndarray],
-    method: ProbeMethod = "logistic",
-    layers: list[int] | None = None,
-) -> CheckpointGeometry:
+    results_dir: Path,
+) -> None:
     """
-    Run compute_layer_geometry for all requested layers.
+    For each layer, compute Pearson r between the entanglement score and
+    the over-refusal rate (FP rate) estimated from run_experiment output.
 
-    All three hidden-state dicts must have the same key set (layer indices).
+    The over-refusal rate for this (checkpoint, system_prompt) pair is a
+    scalar, so the correlation is across layers within one checkpoint.
+    We also emit a joint CSV for downstream multi-checkpoint analysis.
     """
-    if layers is None:
-        layers = sorted(hidden_harmful.keys())
+    df = pd.read_csv(io_csv)
+    subset = df[
+        (df["checkpoint"] == checkpoint_tag)
+        & (df["checkpoint"].str.endswith(f"__{system_prompt_key}"))
+    ] if "checkpoint" in df.columns else df
 
-    geom = CheckpointGeometry(
-        checkpoint_tag=checkpoint_tag,
-        system_prompt=system_prompt_key,
+    # FP rate: safe prompts (label=0) that were refused (predicted_refusal=1)
+    safe_df = subset[subset["label"] == 0] if "label" in subset.columns else pd.DataFrame()
+    if len(safe_df) == 0:
+        logger.warning("No label=0 rows in I/O CSV for this checkpoint/system_prompt.")
+        return
+
+    fp_rate = safe_df["predicted_refusal"].mean() if "predicted_refusal" in safe_df else None
+    if fp_rate is None:
+        return
+
+    out = results_dir / "geometry" / f"{checkpoint_tag}__{system_prompt_key}_io_corr.csv"
+    rows = [
+        {
+            "layer":           lg.layer,
+            "entanglement":    lg.entanglement,
+            "boundary_margin": lg.boundary_margin,
+            "fp_rate":         fp_rate,   # same scalar for all layers
+        }
+        for lg in geom.layers
+    ]
+    pd.DataFrame(rows).to_csv(out, index=False)
+    logger.info("I/O correlation table saved to %s  (fp_rate=%.3f)", out, fp_rate)
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+
+    p.add_argument(
+        "--config", required=True,
+        help="Config module name, e.g. config_olmo2"
+    )
+    p.add_argument(
+        "--experiment", required=True,
+        choices=["entanglement", "evolution", "system_prompt"],
+        help=(
+            "entanglement: Exp 1 — single checkpoint geometry + I/O correlation; "
+            "evolution: Exp 2 — track entanglement across training stages; "
+            "system_prompt: Exp 3 — compare system prompts."
+        ),
     )
 
-    for l in tqdm(layers, desc=f"Computing geometry [{checkpoint_tag}]"):
-        lg = compute_layer_geometry(
-            layer=l,
-            hidden_harmful=hidden_harmful[l],
-            hidden_safe=hidden_safe[l],
-            hidden_over=hidden_over[l],
-            method=method,
-        )
-        geom.layers.append(lg)
+    # Exp 1 specific
+    p.add_argument("--checkpoint", default=None,
+                   help="[Exp 1] Checkpoint tag (e.g. sft__none)")
+    p.add_argument("--system-prompt", default="none",
+                   help="System prompt key defined in config SYSTEM_PROMPTS")
 
-    return geom
+    # Shared
+    p.add_argument("--n-samples", type=int, default=200,
+                   help="Number of prompts per category")
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--layer-stride", type=int, default=1,
+                   help="Analyse every N-th layer (1 = all layers)")
+    p.add_argument("--probe-method", default="logistic",
+                   choices=["logistic", "mean_diff"],
+                   help="Method for fitting linear probe direction")
+    p.add_argument("--token-position", default="last",
+                   choices=["last", "first", "mean"])
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--force", action="store_true",
+                   help="Recompute even if cached .npz exists")
 
-
-# ---------------------------------------------------------------------------
-# Persistence helpers
-# ---------------------------------------------------------------------------
-
-def save_geometry(geom: CheckpointGeometry, path: Path) -> None:
-    """Save a CheckpointGeometry to a compressed numpy archive."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    arrays: dict[str, np.ndarray] = {}
-    meta_keys = []
-    for lg in geom.layers:
-        prefix = f"layer{lg.layer:03d}"
-        arrays[f"{prefix}_v_ref"]      = lg.v_ref
-        arrays[f"{prefix}_v_over"]     = lg.v_over
-        arrays[f"{prefix}_v_over_perp"]= lg.v_over_perp
-        meta_keys.append(
-            f"{lg.layer},{lg.entanglement:.6f},{lg.boundary_margin:.6f},"
-            f"{lg.probe_ref_acc:.4f},{lg.probe_over_acc:.4f}"
-        )
-
-    arrays["__meta__"] = np.array(meta_keys)
-    arrays["__tags__"] = np.array([geom.checkpoint_tag, geom.system_prompt])
-    np.savez_compressed(path, **arrays)
-    logger.info("Saved geometry to %s", path)
+    return p
 
 
-def load_geometry(path: Path) -> CheckpointGeometry:
-    """Load a CheckpointGeometry previously saved with save_geometry."""
-    path = Path(path)
-    data = np.load(path, allow_pickle=False)
-    tags = data["__tags__"]
-    geom = CheckpointGeometry(
-        checkpoint_tag=str(tags[0]),
-        system_prompt=str(tags[1]),
-    )
-    for row in data["__meta__"]:
-        parts = row.split(",")
-        l         = int(parts[0])
-        entangle  = float(parts[1])
-        margin    = float(parts[2])
-        acc_ref   = float(parts[3])
-        acc_over  = float(parts[4])
-        prefix    = f"layer{l:03d}"
-        geom.layers.append(LayerGeometry(
-            layer=l,
-            v_ref=data[f"{prefix}_v_ref"],
-            v_over=data[f"{prefix}_v_over"],
-            v_over_perp=data[f"{prefix}_v_over_perp"],
-            entanglement=entangle,
-            boundary_margin=margin,
-            probe_ref_acc=acc_ref,
-            probe_over_acc=acc_over,
-        ))
-    return geom
+def main() -> None:
+    args = build_parser().parse_args()
+    cfg  = _load_config(args.config)
+
+    if args.experiment == "entanglement":
+        if args.checkpoint is None:
+            raise ValueError("--checkpoint is required for --experiment entanglement")
+        run_entanglement(args, cfg)
+
+    elif args.experiment == "evolution":
+        run_evolution(args, cfg)
+
+    elif args.experiment == "system_prompt":
+        run_system_prompt(args, cfg)
 
 
-# ---------------------------------------------------------------------------
-# Aggregation across checkpoints
-# ---------------------------------------------------------------------------
-
-def entanglement_table(
-    geometries: list[CheckpointGeometry],
-) -> dict[str, np.ndarray]:
-    """
-    Build a dict  checkpoint_tag -> entanglement_curve (num_layers,)
-    for easy plotting / comparison.
-    """
-    return {
-        f"{g.checkpoint_tag}__{g.system_prompt}": g.entanglement_curve
-        for g in geometries
-    }
+if __name__ == "__main__":
+    main()
