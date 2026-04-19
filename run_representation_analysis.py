@@ -42,16 +42,12 @@ Results land in results/<model>/geometry/ as .npz files and a summary CSV.
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib
 import logging
-import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from analysis.representation_analysis import (
@@ -140,7 +136,6 @@ def _load_model_and_tokenizer(model_name_or_path: str, device: str):
         model_name_or_path,
         torch_dtype=torch.bfloat16,
         device_map=device,
-        output_hidden_states=True,
         trust_remote_code=True,
     )
     model.eval()
@@ -181,6 +176,7 @@ def _geometry_cache_path(results_dir: Path, checkpoint_tag: str, system_prompt_k
 
 def _save_summary_csv(geometries: list[CheckpointGeometry], out_path: Path) -> None:
     """Write a flat CSV with one row per (checkpoint, layer)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for g in geometries:
         for lg in g.layers:
@@ -394,10 +390,20 @@ def _correlate_with_io(
     We also emit a joint CSV for downstream multi-checkpoint analysis.
     """
     df = pd.read_csv(io_csv)
-    subset = df[
-        (df["checkpoint"] == checkpoint_tag)
-        & (df["checkpoint"].str.endswith(f"__{system_prompt_key}"))
-    ] if "checkpoint" in df.columns else df
+
+    if "checkpoint" not in df.columns:
+        subset = df
+    else:
+        # checkpoint column in raw_results.csv follows the pattern
+        # "{stage}__{system_prompt}" (e.g. "sft__none"), matching checkpoint_tag directly.
+        subset = df[df["checkpoint"] == checkpoint_tag]
+        if subset.empty:
+            logger.warning(
+                "No rows matching checkpoint='%s' in %s. "
+                "Check that checkpoint tags in raw_results.csv match config tags.",
+                checkpoint_tag, io_csv,
+            )
+            return
 
     # FP rate: safe prompts (label=0) that were refused (predicted_refusal=1)
     safe_df = subset[subset["label"] == 0] if "label" in subset.columns else pd.DataFrame()

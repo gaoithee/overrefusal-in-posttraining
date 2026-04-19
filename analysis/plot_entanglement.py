@@ -38,7 +38,6 @@ import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -91,7 +90,8 @@ def plot_entanglement_profile(
     Line plot of entanglement cos(v_ref, v_over) per layer,
     with boundary_margin on a twin axis.
     """
-    cache_path = results_dir / "geometry" / f"{checkpoint}__{system_prompt}.npz"
+    safe_ckpt = checkpoint.replace("/", "_").replace(" ", "_")
+    cache_path = results_dir / "geometry" / f"{safe_ckpt}__{system_prompt}.npz"
     if not cache_path.exists():
         raise FileNotFoundError(f"No geometry file at {cache_path}")
 
@@ -169,6 +169,8 @@ def plot_evolution_heatmap(
 
     fig, ax = plt.subplots(figsize=(max(10, len(layers) * 0.4), max(4, len(checkpoints) * 0.7)))
 
+    if np.all(np.isnan(matrix)):
+        raise ValueError("Entanglement matrix is entirely NaN — no valid geometry data found.")
     vabs = max(abs(np.nanmin(matrix)), abs(np.nanmax(matrix)))
     cmap = "RdBu_r" if metric == "entanglement" else "viridis"
     vmin, vmax = (-vabs, vabs) if metric == "entanglement" else (None, None)
@@ -316,7 +318,8 @@ def plot_probe_accuracy(
     system_prompt: str = "none",
     out_path: Path | None = None,
 ) -> plt.Figure:
-    cache_path = results_dir / "geometry" / f"{checkpoint}__{system_prompt}.npz"
+    safe_ckpt = checkpoint.replace("/", "_").replace(" ", "_")
+    cache_path = results_dir / "geometry" / f"{safe_ckpt}__{system_prompt}.npz"
     geom = load_geometry(cache_path)
 
     layers   = geom.layer_indices
