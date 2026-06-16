@@ -1,0 +1,8 @@
+checkpoint,n_harmful,judge_refusal_harmful_%,n_benign,judge_compliance_benign_%,pred_refusal_harmful_%,pred_compliance_benign_%
+base__none,0,,390,93.8,,97.2
+base__mistral_safety,0,,363,91.2,,96.7
+sft__none,0,,495,81.6,,83.6
+sft__mistral_safety,0,,494,76.5,,83.8
+dpo__none,0,,500,88.8,,91.0
+dpo__mistral_safety,0,,500,87.4,,89.4
+final__none,0,,350,89.4,,90.9

@@ -1,0 +1,7 @@
+.env
+.overenv/
+__pycache__/
+*/__pycache__/
+slurm-*.out
+slurm_outputs/
+figures/

@@ -1,21 +1,20 @@
 # Core ML / generation
 torch>=2.0
-transformers>=4.40,<4.47
+transformers>=4.57          # olmo2 architecture support added in 4.57
 accelerate>=0.27
 datasets>=2.18
-ai2-olmo>=0.4.0          # required for OLMo 1 / 2 models
-
+# ai2-olmo no longer needed for OLMo 2/3 — handled natively by transformers>=4.57
 # Data
 pandas>=2.0
 numpy>=1.24
-
+# HuggingFace
+huggingface-hub>=1.12
+tokenizers>=0.22
 # API judge back-end (optional — needed only when JUDGE_API_KEY is set)
 openai>=1.0
 python-dotenv>=1.0
-
 # Plotting
 matplotlib>=3.8
 seaborn>=0.13
-
 # Utilities
 tqdm>=4.66

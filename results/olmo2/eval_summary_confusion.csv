@@ -1,0 +1,8 @@
+checkpoint,TP,FN,FP,TN,precision,recall,F1
+base__none,0,0,11,379,,,
+base__mistral_safety,0,0,12,351,,,
+sft__none,0,0,81,414,,,
+sft__mistral_safety,0,0,80,414,,,
+dpo__none,0,0,45,455,,,
+dpo__mistral_safety,0,0,53,447,,,
+final__none,0,0,32,318,,,

@@ -18,7 +18,7 @@ from typing import Optional
 
 import pandas as pd
 
-from datasets_config import DatasetConfig
+from dataset_config import DatasetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -218,3 +218,13 @@ def _stratified_sample(df: pd.DataFrame, max_samples: Optional[int]) -> pd.DataF
     safe    = df[df["label"] == 0].sample(n=min(n, (df["label"]==0).sum()), random_state=42)
     harmful = df[df["label"] == 1].sample(n=min(n, (df["label"]==1).sum()), random_state=42)
     return pd.concat([safe, harmful]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+def load_dataset_by_key(key: str) -> pd.DataFrame:
+    """Compatibility wrapper used by run_representation_analysis.py."""
+    from dataset_config import ALL_DATASETS
+    if key not in ALL_DATASETS:
+        raise ValueError(
+            f"Unknown dataset key: '{key}'. Available: {list(ALL_DATASETS)}"
+        )
+    return load_dataset_from_config(ALL_DATASETS[key])

@@ -11,7 +11,7 @@ Venv: .venv-olmo23
 from dataclasses import dataclass
 from typing import Optional
 
-from datasets_config import ALL_DATASETS
+from dataset_config import ALL_DATASETS
 
 
 # ---------------------------------------------------------------------------
@@ -102,3 +102,19 @@ GENERATION: GenerationConfig = GenerationConfig()
 
 RESULTS_DIR: str = "results/olmo2"
 LOG_LEVEL: str = "INFO"
+
+# ---------------------------------------------------------------------------
+# Runner-compatible structures
+# ---------------------------------------------------------------------------
+MODEL_KEY = "olmo2"
+
+CHECKPOINTS = [
+    {"tag": "base__none",            "model": "allenai/OLMo-2-1124-7B"},
+    {"tag": "base__mistral_safety",  "model": "allenai/OLMo-2-1124-7B"},
+    {"tag": "sft__none",             "model": "allenai/OLMo-2-1124-7B-SFT"},
+    {"tag": "sft__mistral_safety",   "model": "allenai/OLMo-2-1124-7B-SFT"},
+    {"tag": "dpo__none",             "model": "allenai/OLMo-2-1124-7B-DPO"},
+    {"tag": "dpo__mistral_safety",   "model": "allenai/OLMo-2-1124-7B-DPO"},
+    {"tag": "final__none",           "model": "allenai/OLMo-2-1124-7B-Instruct"},
+    {"tag": "final__mistral_safety", "model": "allenai/OLMo-2-1124-7B-Instruct"},
+]
