@@ -172,12 +172,67 @@ Geometry predicts Partial Distancing (mediated by Level 1). Goal Addressness dep
 
 ---
 
+## 9b. Behavioral Probe — Cross-Checkpoint Transfer
+
+`results/olmo2/geometry/behavioral_probe.csv`
+
+Probe logistica che predice `predicted_refusal` dalle attivazioni `first_gen`.
+
+### Phase 1 — Within-checkpoint accuracy (cross-val)
+
+| checkpoint | layer | acc_all | acc_pseudo_only |
+|---|---|---|---|
+| base__none | 8–31 | 0.917–0.930 | 0.978–0.981 |
+| sft__none | 8–31 | 0.954–0.968 | 0.974–0.977 |
+| dpo__none | 8–31 | 0.914–0.935 | 0.922–0.944 |
+| final__none | 8–31 | 0.914–0.929 | 0.919–0.934 |
+
+SFT ha il decision boundary più netto e linearmente separabile. DPO e final hanno accuracy leggermente inferiore — coerente con l'ipotesi che DPO agisce su qualcosa di non lineare.
+
+### Phase 2 — Cross-checkpoint transfer
+
+**Trained on base__none:**
+
+| layer | base | sft | dpo | final |
+|---|---|---|---|---|
+| 8 | 0.947 | 0.600 | 0.660 | 0.660 |
+| 16 | 0.970 | 0.602 | 0.637 | 0.636 |
+| 19 | 0.983 | 0.615 | 0.647 | 0.643 |
+| 24 | 0.998 | 0.859 | 0.795 | 0.792 |
+| 26 | 0.999 | 0.865 | 0.815 | 0.809 |
+| 31 | 1.000 | 0.909 | 0.877 | 0.878 |
+
+**Trained on sft__none:**
+
+| layer | sft | dpo | final |
+|---|---|---|---|
+| 8 | 0.968 | 0.939 | 0.938 |
+| 16 | 0.987 | 0.951 | 0.951 |
+| 19 | 0.996 | 0.951 | 0.951 |
+| 24 | 1.000 | 0.952 | 0.953 |
+| 26 | 1.000 | 0.953 | 0.953 |
+| 31 | 1.000 | 0.951 | 0.950 |
+
+**Key findings:**
+- Base→SFT: accuracy crolla a 60–62% ai layer 8–19. Il base non conosce il decision boundary di SFT.
+- Base→SFT ai layer profondi (24–31): risale a 86–91% — ai layer profondi c'è più struttura comportamentale condivisa.
+- SFT→DPO: 93–95% stabile su tutti i layer. Il decision boundary comportamentale si trasferisce quasi perfettamente.
+- SFT→Final: identico a SFT→DPO.
+
+**Three-level dissociation:**
+1. Geometric structure (centroid cosines SFT→DPO >0.93): stable
+2. Behavioral decision boundary (probe transfer SFT→DPO ~0.95): stable
+3. I/O behavior (compliance 66%→79%): changes
+
+DPO does not move representations and does not move the linear decision boundary. It acts on a third level — likely token probability distributions — not capturable by linear probes on the residual stream.
+
+---
+
 ## Experiments In Progress
 
 | experiment | script | output |
 |---|---|---|
 | 3-class semantic probe, all checkpoints | `run_classification.py` | `slurm_outputs/clf-3cat.out` |
-| Behavioral probe + cross-checkpoint transfer | `compute_behavioural_probe.py` | `slurm_outputs/beh-probe.out` |
 
 ---
 
