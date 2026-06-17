@@ -8,7 +8,7 @@ CRITICAL FIX over v1:
     The original script tokenised the raw prompt text without the chat
     template.  But olmo_loader.py generates responses using
     apply_chat_template (for instruct models) or a manual
-    "User: …\\nAssistant:" framing (for the base model).  This script
+    "User: …\nAssistant:" framing (for the base model).  This script
     now replicates that exact framing so that the forward-pass context
     matches the context in which the response was originally produced.
 
@@ -17,23 +17,23 @@ Positions extracted per layer
     last_prompt        — last token of the user text
     post_instr_0..N-1  — every post-instruction token (template suffix
                          between user text and response start).
-                         For instruct models: \\n < | assistant | > \\n
-                         For base model: \\n Assistant :
+                         For instruct models: \n < | assistant | > \n
+                         For base model: \n Assistant :
     first_gen          — first token of the response
 
 Usage
 -----
-    python extract_and_push.py \\
-        --csv results/olmo2_raw_results.csv \\
-        --hf-repo saracandu/olmo-activations \\
-        --hf-token $HF_TOKEN \\
+    python extract_and_push.py \
+        --csv results/olmo2_raw_results.csv \
+        --hf-repo saracandu/olmo-activations \
+        --hf-token $HF_TOKEN \
         --batch-size 32 --device cuda
 
     # Post-instruction columns only (non-destructive)
-    python extract_and_push.py \\
-        --csv results/olmo2_raw_results.csv \\
-        --hf-repo saracandu/olmo-activations \\
-        --hf-token $HF_TOKEN \\
+    python extract_and_push.py \
+        --csv results/olmo2_raw_results.csv \
+        --hf-repo saracandu/olmo-activations \
+        --hf-token $HF_TOKEN \
         --post-instr-only
 """
 
@@ -221,22 +221,18 @@ def build_full_ids(
         full = full[:max_length]
     T = len(full)
 
-    # Step 5: locate the user text tokens inside prompt_ids to find
-    # last_prompt_idx and post_instr_indices
-    raw_user_ids = tokenizer.encode(prompt, add_special_tokens=False)
-    n_user = len(raw_user_ids)
-
-    # Search for the user text tokens within prompt_ids
-    last_prompt_idx = None
-    for start in range(len(prompt_ids) - n_user + 1):
-        if prompt_ids[start: start + n_user] == raw_user_ids:
-            last_prompt_idx = start + n_user - 1   # last user-text token
-            post_start = start + n_user            # first post-instr token
-            break
-
-    if last_prompt_idx is None:
-        # Fallback: assume user text is at the end of prompt_ids
-        log.warning("Could not locate user text in prompt_ids, using fallback.")
+    # Step 5: locate the user text within prompt_string by character position,
+    # then tokenise the prefix up to that point.
+    # Token-level search fails for the base model (no chat template) due to
+    # BPE context sensitivity — character-level search is robust for all
+    # checkpoints.
+    if prompt in prompt_string:
+        user_end_char = prompt_string.index(prompt) + len(prompt)
+        prefix_ids = tokenizer.encode(prompt_string[:user_end_char], add_special_tokens=False)
+        last_prompt_idx = len(prefix_ids) - 1
+        post_start = len(prefix_ids)
+    else:
+        log.warning("Could not locate user text in prompt_string, using fallback.")
         last_prompt_idx = len(prompt_ids) - 1
         post_start = len(prompt_ids)
 
@@ -380,14 +376,13 @@ def detect_n_post_instr(
     """
     prompt_string = build_prompt_string(sample_prompt, tokenizer, system_prompt)
     prompt_ids = tokenizer.encode(prompt_string, add_special_tokens=False)
-    raw_ids = tokenizer.encode(sample_prompt, add_special_tokens=False)
-    n_user = len(raw_ids)
 
-    for start in range(len(prompt_ids) - n_user + 1):
-        if prompt_ids[start: start + n_user] == raw_ids:
-            n = len(prompt_ids) - (start + n_user)
-            log.info("Detected %d post-instruction token(s).", n)
-            return n
+    if sample_prompt in prompt_string:
+        user_end_char = prompt_string.index(sample_prompt) + len(sample_prompt)
+        prefix_ids = tokenizer.encode(prompt_string[:user_end_char], add_special_tokens=False)
+        n = len(prompt_ids) - len(prefix_ids)
+        log.info("Detected %d post-instruction token(s).", n)
+        return n
 
     log.warning("Could not detect post-instruction count, defaulting to 0.")
     return 0

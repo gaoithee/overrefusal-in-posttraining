@@ -72,7 +72,7 @@ def load_full_dataset(hf_dataset, layers, position, token, checkpoints, extra_co
     """
     from datasets import load_dataset
 
-    base_cols = ["label", "source", "checkpoint"]
+    base_cols = ["label", "source", "checkpoint", "predicted_refusal"]
     if extra_cols:
         base_cols += [c for c in extra_cols if c not in base_cols]
     act_cols = [f"layer_{l}_{position}" for l in layers]
@@ -230,7 +230,7 @@ def compute_projections_for_layer(df_ckpt, layer, position, orthogonalize, sampl
 
     x, y = project_2d(acts_plot, v_ref_hat, v_over_hat, cd_ref, cd_over, mu_harmless)
 
-    proj = df_plot[["group", "source"] +
+    proj = df_plot[["group", "source", "predicted_refusal"] +
                    (["category"] if "category" in df_plot.columns else [])].copy()
     proj["x"] = x
     proj["y"] = y
@@ -260,11 +260,19 @@ def compute_projections_for_layer(df_ckpt, layer, position, orthogonalize, sampl
 
 def make_legend_handles():
     handles = []
-    for g in ["harmful", "pseudo_harm", "harmless"]:
+    for g in ["harmful", "harmless"]:
         handles.append(plt.scatter(
             [], [], color=GROUP_COLOR[g], marker=GROUP_MARKER[g],
             alpha=0.7, s=30, label=GROUP_LABEL[g]
         ))
+    handles.append(plt.scatter(
+        [], [], color="#f4a261", marker="^",
+        alpha=0.7, s=30, label="pseudo-harmful (rifiutato)"
+    ))
+    handles.append(plt.scatter(
+        [], [], color="#2a9d8f", marker="s",
+        alpha=0.7, s=30, label="pseudo-harmful (non rifiutato)"
+    ))
     handles.append(plt.scatter(
         [], [], color="gray", marker="*", s=80,
         edgecolors="black", linewidths=1, label="centroide"
@@ -313,14 +321,26 @@ def plot_grid(
                 sub = proj_show[proj_show["group"] == group]
                 if len(sub) == 0:
                     continue
-                # Punti inclusi nel calcolo delle direzioni
                 sub_in  = sub[~sub["excluded"]] if "excluded" in sub.columns else sub
                 sub_out = sub[sub["excluded"]]  if "excluded" in sub.columns else sub.iloc[0:0]
-                if len(sub_in) > 0:
-                    ax.scatter(sub_in["x"], sub_in["y"],
-                               color=GROUP_COLOR[group],
-                               marker=GROUP_MARKER[group],
-                               alpha=0.4, s=13, linewidths=0.5)
+
+                if group == "pseudo_harm" and "predicted_refusal" in sub_in.columns:
+                    refused = sub_in[sub_in["predicted_refusal"] == 1]
+                    not_refused = sub_in[sub_in["predicted_refusal"] == 0]
+                    if len(refused) > 0:
+                        ax.scatter(refused["x"], refused["y"],
+                                   color="#f4a261",
+                                   marker="^", alpha=0.5, s=18, linewidths=0.5)
+                    if len(not_refused) > 0:
+                        ax.scatter(not_refused["x"], not_refused["y"],
+                                   color="#2a9d8f",
+                                   marker="s", alpha=0.4, s=13, linewidths=0.5)
+                else:
+                    if len(sub_in) > 0:
+                        ax.scatter(sub_in["x"], sub_in["y"],
+                                   color=GROUP_COLOR[group],
+                                   marker=GROUP_MARKER[group],
+                                   alpha=0.4, s=13, linewidths=0.5)
                 if len(sub_out) > 0:
                     ax.scatter(sub_out["x"], sub_out["y"],
                                color="gray",
