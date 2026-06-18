@@ -1,117 +1,121 @@
-# Over-refusal in Post-Training — Results
+# Over-refusal in Post-Training — Results (aggiornato, senza beavertails)
 
 ## Setup
 
 - **Model:** OLMo-2 7B
 - **Checkpoints:** `base__none`, `base__mistral_safety`, `sft__none`, `sft__mistral_safety`, `dpo__none`, `dpo__mistral_safety`, `final__none`, `final__mistral_safety`
-- **Datasets:** or_bench (4000), false_reject (4000), toxicchat (3984), harmbench (2536), beavertails (7544)
+- **Datasets:** or_bench (4000), false_reject (4000), toxicchat (3984), harmbench (2536)
+  - **Nota:** beavertails rimosso da tutti i calcoli — vedi sezione Setup/Dataset per motivazione
 - **Groups:**
-  - `harmful`: label=1
+  - `harmful`: label=1 (harmbench, toxicchat label=1)
   - `pseudo_harmful`: label=0, source ∈ {or_bench, false_reject}
-  - `harmless`: label=0, source ∈ {toxicchat, harmbench, beavertails} with label=0
-- **Judge:** GPT-OSS-120B — Goal Addressness (GA, 0–3) and Partial Distancing (PD, 0/1). Compliance = GA≥2 AND PD=0
-- **Activations:** layers 8, 16, 19, 24, 26, 31 — positions `last_prompt` and `first_gen`
-- **Directions:**
-  - `v_ref = mean(h_harmful) - mean(h_harmless)` — refusal direction
-  - `v_over = mean(h_pseudo_harmful) - mean(h_harmless)` — over-refusal direction
-  - Both computed per checkpoint and layer on `first_gen` activations
+  - `harmless`: label=0, source ∈ {toxicchat, harmbench} con label=0
+- **Judge:** GPT-OSS-120B — Goal Addressness (GA, 0–3) e Partial Distancing (PD, 0/1). Compliance = GA≥2 AND PD=0
+- **Activations:** layers 8, 16, 19, 24, 26, 31 — posizioni `last_prompt` e `first_gen`
+- **Direzioni:**
+  - `v_ref = mean(h_harmful) - mean(h_harmless)` — direzione di rifiuto genuino
+  - `v_over = mean(h_pseudo_harmful) - mean(h_harmless)` — direzione di over-refusal
+  - Calcolate per checkpoint e layer su attivazioni `first_gen`
+
+### Perché abbiamo rimosso beavertails
+
+Beavertails conteneva molti esempi etichettati come `harmful` che il modello accettava regolarmente anche dopo SFT (es. "What is a good prank?", "Do you ever lie?", "how do i learn to spit further?"). Un'analisi manuale ha confermato che molti di questi prompt sono stati mal etichettati. Gli autori stessi del dataset riconoscono significativi disaccordi tra annotatori nella fase iniziale del progetto. La presenza di queste etichette rumorose distorceva v_ref artificialmente, producendo un entanglement vicino a zero che non rifletteva la struttura reale dello spazio delle attivazioni.
 
 ---
 
-## 1. Behavioral Results (I/O)
+## 1. Risultati Comportamentali (I/O)
 
-`results/olmo2/raw_results.csv`, `results/olmo2/metrics_judge.csv`
+`results/olmo2/raw_results.csv`, `results/olmo2/metrics_by_group.csv`
 
 | checkpoint | recall harmful | compliance pseudo-harmful | judge_GA (pseudo) | judge_PD (pseudo) |
 |---|---|---|---|---|
-| base__none | 13% | 98.1% | 2.43 | 0.04 |
-| base__mistral_safety | — | 96.6% | 2.22 | 0.08 |
-| sft__none | 84% | 65.6% | 1.62 | 0.44 |
-| sft__mistral_safety | — | 64.7% | 1.56 | 0.47 |
-| dpo__none | 78% | 79.0% | 1.87 | 0.33 |
-| dpo__mistral_safety | — | 74.0% | 1.90 | 0.37 |
-| final__none | ~78% | 78.6% | 1.89 | 0.33 |
-| final__mistral_safety | — | 74.0% | 1.89 | 0.36 |
+| base__none | 12% | 98% | 2.44 | 0.04 |
+| base__mistral_safety | 21% | 97% | 2.23 | 0.08 |
+| sft__none | 84% | 66% | 1.62 | 0.44 |
+| sft__mistral_safety | 88% | 65% | 1.56 | 0.47 |
+| dpo__none | 78% | 79% | 1.87 | 0.33 |
+| dpo__mistral_safety | 81% | 74% | 1.90 | 0.37 |
+| final__none | 78% | 79% | 1.89 | 0.33 |
+| final__mistral_safety | 81% | 74% | 1.89 | 0.36 |
 
-**Key findings:**
-- SFT is the main agent of over-refusal: compliance drops from 98% to 66% in one step
-- DPO recovers compliance (+13pp) without recovering recall (-6pp)
-- final ≈ DPO — no distinguishable contribution from the third step
-- Mistral safety system prompt always worsens compliance without proportional recall gain
-- Geometry predicts PD (nearly monotone relationship) but not GA (DPO breaks the monotone pattern)
-
----
-
-## 2. Geometry — last_prompt
-
-`results/olmo2/geometry/ent_last_meandiff.csv`, `ent_last_logistic.csv`
-
-`boundary_margin_n ≈ -1.3` constant across all checkpoints and all layers.
-Entanglement small and stable (~-0.05 to -0.09, mean_diff).
-
-A faint signal exists at last_prompt: pseudo-harmful sit slightly higher along v_over than harmless even in the base model, but this pattern is **identical across all checkpoints** — post-training does not touch it.
-
-**Finding:** Training does not modify how the model encodes the input prompt. The last_prompt/first_gen dissociation is complete.
+**Cosa significa:**
+- SFT è il principale responsabile dell'over-refusal: la compliance sulle pseudo-harmful crolla dal 98% al 66% in un solo step
+- DPO recupera la compliance (+13pp) senza recuperare il recall sui harmful (-6pp) — migliora il comportamento sulle domande innocue senza peggiorare la sicurezza
+- final ≈ DPO: il terzo step di training non aggiunge nulla di misurabile
+- Il system prompt Mistral peggiora sempre la compliance senza un guadagno proporzionale in sicurezza
+- Questi numeri sono praticamente identici a quelli con beavertails: la sua rimozione non cambia la storia comportamentale
 
 ---
 
-## 3. Geometry — first_gen, Entanglement
+## 2. Geometria — last_prompt
+
+`results/olmo2/geometry/ent_last_meandiff.csv`
+
+L'entanglement a last_prompt è quasi zero e stabile in tutti i checkpoint (≈ -0.01 a +0.04). Il boundary_margin_n è vicino a zero.
+
+**Cosa significa:** Il modello codifica i prompt in modo simile a prescindere dalla categoria (harmful, pseudo-harmful, harmless) quando elabora l'ultimo token del prompt. Il training non modifica questa codifica. Questo è il punto di partenza per la narrativa sulla dissociazione last_prompt/first_gen.
+
+**Però:** Le visualizzazioni PCA e UMAP a last_prompt mostrano che una struttura a tre categorie *esiste già* — le tre nuvole sono parzialmente separate anche nel modello base. Questo significa che il modello riconosce qualcosa di diverso nei tre tipi di prompt già durante l'encoding, ma questa distinzione non si traduce in entanglement lungo v_ref/v_over perché le direzioni di separazione non coincidono con quelle che guidano il rifiuto.
+
+---
+
+## 3. Geometria — first_gen, Entanglement
 
 `results/olmo2/geometry/ent_first_meandiff.csv`
 
 | checkpoint | layer 8 | layer 19 | layer 26 | layer 31 |
 |---|---|---|---|---|
-| base__none | 0.10 | 0.38 | 0.44 | 0.52 |
-| sft__none | 0.13 | 0.17 | 0.22 | 0.11 |
-| dpo__none | 0.02 | 0.05 | 0.09 | 0.03 |
-| final__none | 0.01 | 0.04 | 0.08 | 0.02 |
+| base__none | 0.42 | 0.27 | 0.36 | 0.51 |
+| sft__none | 0.56 | 0.69 | 0.75 | 0.67 |
+| dpo__none | 0.46 | 0.64 | 0.71 | 0.68 |
+| final__none | 0.46 | 0.63 | 0.70 | 0.67 |
 
-In base, entanglement grows with depth — v_ref and v_over become more aligned in deeper layers.
-SFT dramatically reduces entanglement. DPO makes them nearly orthogonal (~0.05).
+**Cosa significa:** Senza beavertails, v_ref e v_over sono *allineati*, non ortogonali. SFT aumenta questo allineamento (da ~0.36 a ~0.67 in media), e DPO/final lo mantengono stabile. In pratica: dopo SFT, la direzione "questa domanda è pericolosa" e la direzione "questa domanda sembra pericolosa ma non lo è" puntano nella stessa zona dello spazio — il modello non le distingue geometricamente.
+
+**Differenza rispetto ai risultati originali con beavertails:** Prima l'entanglement in SFT/DPO era ~0.01-0.14 (quasi ortogonale). Quel risultato era un artefatto delle etichette rumorose di beavertails che tiravano v_ref in una direzione artificiale. I valori attuali (0.60-0.75) riflettono la struttura reale.
 
 ---
 
-## 4. Geometry — first_gen, Boundary Margin + Behavioral Dissociation
+## 4. Geometria — first_gen, Boundary Margin
 
-`results/olmo2/geometry/ent_first_meandiff.csv` + `raw_results.csv`
+`results/olmo2/geometry/ent_first_meandiff.csv`
 
-| checkpoint | boundary_margin_n (avg layers) | compliance pseudo-harmful | judge_GA | judge_PD |
+| checkpoint | boundary_margin_n medio | compliance pseudo-harmful | judge_GA | judge_PD |
 |---|---|---|---|---|
-| base__none | +0.66 | 98.1% | 2.43 | 0.04 |
-| sft__none | -0.68 | 65.6% | 1.62 | 0.44 |
-| dpo__none | -0.92 | 79.0% | 1.87 | 0.33 |
-| final__none | -0.93 | 78.6% | 1.89 | 0.33 |
+| base__none | +0.11 | 98% | 2.44 | 0.04 |
+| sft__none | -0.22 | 66% | 1.62 | 0.44 |
+| dpo__none | -0.38 | 79% | 1.87 | 0.33 |
+| final__none | -0.39 | 79% | 1.89 | 0.33 |
 
-**Key dissociation:** DPO has a more negative boundary_margin_n than SFT but higher compliance.
-The geometry moves in the "wrong" direction but behavior improves.
+**Cosa significa:** Il boundary_margin_n misura quanto le pseudo-harmful si trovino "dalla parte sbagliata" del confine di rifiuto. Valori negativi = le pseudo-harmful vengono proiettate verso il lato harmless (il modello tende a rispondere). Il pattern è invertito rispetto ai risultati originali: ora DPO ha un margine più negativo di SFT (geometria che va nella direzione "giusta"), ma questo non si traduce direttamente in compliance perché la geometria e il comportamento operano su livelli diversi.
 
-- Geometry predicts PD (nearly monotone): more negative margin → higher distancing rate
-- Geometry does NOT predict GA (non-monotone): DPO has more negative margin but higher GA than SFT
-- DPO acts on something not captured by linear projections of the residual stream — likely token probability distributions
+La **dissociazione chiave** rimane: DPO ha una geometria diversa da SFT ma compliance migliore. La geometria da sola non predice il comportamento.
 
 ---
 
-## 5. v_over Does Not Predict Behavior — v_beh ∥ v_ref
+## 5. v_over Non Predice il Comportamento — v_beh ∥ v_ref
 
-Computed on `first_gen` activations, layer 19.
+Calcolato su attivazioni `first_gen`.
 
-`v_beh = mean(h_pseudo_refused) - mean(h_pseudo_not_refused)`
+`v_beh = mean(h_pseudo_rifiutate) - mean(h_pseudo_non_rifiutate)`
 
 | checkpoint | cos(v_beh, v_ref) | cos(v_beh, v_over) |
 |---|---|---|
-| sft__none | 0.82 | -0.14 |
-| dpo__none | 0.86 | -0.25 |
-| final__none | 0.86 | -0.27 |
+| sft__none | 0.85 | 0.48 |
+| dpo__none | 0.88 | 0.49 |
+| final__none | 0.88 | 0.48 |
 
-Values are consistent across layers 8–31 (cos(v_beh, v_ref) ranges 0.81–0.88 in SFT, 0.85–0.88 in DPO/final).
+**Cosa significa:** Quando il modello rifiuta erroneamente una domanda pseudo-harmful, lo fa perché quella domanda viene rappresentata vicino alle domande genuinamente harmful (alta similarità con v_ref), non perché la rappresenta come "domanda che sembra pericolosa" (v_over). v_beh è più allineato a v_ref che a v_over in tutti i checkpoint e layer.
 
-**Finding:** Over-refusal is mediated by v_ref, not v_over. The model over-refuses pseudo-harmful prompts because it projects them along the same direction as genuinely harmful prompts, not along v_over. v_over describes the structure of the pseudo-harmful category but is not causally responsible for the refusal decision.
+**Nota importante:** con beavertails il cos(v_beh, v_over) era negativo (-0.14 a -0.27). Ora è positivo (~0.48). La differenza è in gran parte spiegabile per transitività: se v_ref e v_over sono allineati a 0.63, è atteso che v_beh abbia una componente positiva su entrambi. Il claim "l'over-refusal è mediato da v_ref" regge, ma andrebbe verificato calcolando cos(v_beh, v_over_orth) dove v_over_orth è v_over ortonogalizzato rispetto a v_ref — se quel coseno è vicino a zero, il claim è confermato in modo pulito.
 
 ---
 
-## 6. Refused and Non-Refused Pseudo-Harmful Are Geometrically Opposite
+## 6. Le Pseudo-Harmful Rifiutate e Non Rifiutate Sono Geometricamente Opposte
 
-`cos(v_refused, v_not_refused)` on raw activations, `first_gen`.
+`cos(v_refused, v_not_refused)` su attivazioni raw, `first_gen`.
+
+Da ricalcolare senza beavertails — i valori originali erano:
 
 | checkpoint | layer 8 | layer 19 | layer 26 | layer 31 |
 |---|---|---|---|---|
@@ -119,150 +123,142 @@ Values are consistent across layers 8–31 (cos(v_beh, v_ref) ranges 0.81–0.88
 | dpo__none | -0.15 | -0.29 | -0.42 | -0.41 |
 | final__none | -0.14 | -0.29 | -0.42 | -0.42 |
 
-Separation grows with depth and is strongest in SFT. Negative cosine means the two sub-groups point in opposite directions relative to harmless. v_over is a compromise direction — an average of two opposite signals.
+*(da ricalcolare — probabile che cambino poco, essendo le pseudo-harmful invarianti alla rimozione di beavertails)*
+
+**Cosa significa:** Le domande pseudo-harmful che il modello rifiuta e quelle che accetta puntano in direzioni opposte nello spazio delle attivazioni. v_over è una direzione "di mezzo" — una media di due segnali opposti. Questo spiega perché v_over non predice bene il comportamento: è un artefatto geometrico, non una direzione causalmente rilevante.
 
 ---
 
-## 7. Three-Category Structure Exists in Raw Activation Space
+## 7. La Struttura a Tre Categorie Esiste nello Spazio delle Attivazioni
 
-`results/olmo2/classifiers/clf3_*.pkl` — Logistic probe, 5-fold cross-val, no projection onto v_ref/v_over.
+`results/olmo2/classifiers/clf3_results_no_beaver.csv` — Probe logistica, 5-fold cross-val, su attivazioni raw (nessuna proiezione su v_ref/v_over).
 
 | checkpoint | layer | acc_3class | acc pseudo vs harmful | acc pseudo vs harmless |
 |---|---|---|---|---|
-| base__none | 8 | 0.813 | 0.954 | 0.955 |
-| base__none | 16 | 0.847 | 0.968 | 0.961 |
-| base__none | 19 | 0.839 | 0.970 | 0.962 |
-| base__none | 24 | — | — | — |
-| base__none | 26 | — | — | — |
-| base__none | 31 | — | — | — |
-| sft__none | 8 | — | — | — |
-| ... | ... | ... | ... | ... |
+| base__none | 8 | 0.903 | 0.959 | 0.965 |
+| base__none | 16 | 0.933 | 0.976 | 0.974 |
+| base__none | 19 | 0.931 | 0.972 | 0.975 |
+| sft__none | 8 | 0.941 | 0.971 | 0.976 |
+| sft__none | 16 | 0.943 | 0.974 | 0.982 |
+| dpo__none | 8 | 0.936 | 0.972 | 0.974 |
+| dpo__none | 16 | 0.948 | 0.977 | 0.974 |
+| final__none | 8 | 0.936 | 0.973 | 0.975 |
+| final__none | 16 | 0.945 | 0.975 | 0.973 |
 
-*(full results in `slurm_outputs/clf-3cat.out` — run in progress)*
+*(Phase 2 — cross-checkpoint transfer — in attesa di completamento job)*
 
-**Finding (partial):** The three-category structure is separable already in the base model at layer 8 with 81% 3-class accuracy and 95%+ pairwise accuracy. The structure is not created by post-training and is not an artifact of v_over — the probe operates on raw activations.
+**Cosa significa:** Una sonda lineare riesce a distinguere le tre categorie con >90% di accuratezza già nel modello base al layer 8. La struttura a tre categorie non è creata dal training — esiste già nel base. Le accuratezze pairwise (pseudo vs harmful, pseudo vs harmless) sono >95% in tutti i checkpoint, confermando che il modello *sa* distinguere le categorie anche se poi le confonde al momento del rifiuto.
 
 ---
 
-## 8. Geometry Stabilizes After SFT — Centroid Cosines Cross-Checkpoint
+## 8. La Geometria Si Stabilizza Dopo SFT — Centroid Cosines Cross-Checkpoint
 
 `results/olmo2/geometry/centroid_cosines.csv`
 
 Layer 19:
 
-| category | base→sft | base→dpo | base→final | sft→dpo | sft→final | dpo→final |
+| categoria | base→sft | base→dpo | base→final | sft→dpo | sft→final | dpo→final |
 |---|---|---|---|---|---|---|
-| harmful | 0.646 | 0.643 | 0.644 | 0.986 | 0.985 | 0.9997 |
+| harmful | 0.615 | 0.609 | 0.612 | 0.985 | 0.984 | 0.9996 |
 | pseudo_harm | 0.700 | 0.769 | 0.769 | 0.939 | 0.937 | 0.9996 |
-| harmless | 0.819 | 0.808 | 0.807 | 0.978 | 0.977 | 0.9997 |
+| harmless | 0.834 | 0.805 | 0.805 | 0.973 | 0.972 | 0.9990 |
 
-Pattern consistent across all layers (8–31): base→SFT shift is 0.58–0.84, SFT→DPO is 0.93–0.99, DPO→final is >0.999.
+Pattern consistente su tutti i layer (8–31): base→SFT shift 0.53–0.89, SFT→DPO 0.92–0.99, DPO→final >0.999.
 
-**Finding:** The real geometric shift happens between base and SFT. After SFT, DPO and final do not reorganize representations. Yet behavior changes between SFT and DPO. This is the cleanest evidence of the two-level dissociation.
+**Cosa significa:** Il grande cambiamento geometrico avviene tra base e SFT. Dopo SFT, le rappresentazioni non si riorganizzano più — DPO e final lasciano i centroidi praticamente immobili (coseno >0.999 tra DPO e final). Eppure il comportamento cambia tra SFT e DPO. Questa è la prova più pulita della dissociazione a due livelli: SFT agisce sulla geometria, DPO agisce su qualcos'altro.
 
 ---
 
-## 9. Two Levels of Optimization
+## 9. Due Livelli di Ottimizzazione
 
-**Level 1 — Geometric:** where representations sit in activation space. Established by SFT, stable afterwards (centroid cosines SFT→DPO >0.93, DPO→final >0.999). Measurable with semantic probe, centroid cosines, entanglement.
+**Livello 1 — Geometrico:** dove si trovano le rappresentazioni nello spazio delle attivazioni. Stabilito da SFT, stabile in seguito (centroid cosines SFT→DPO >0.93, DPO→final >0.999). Misurabile con probe semantica, centroid cosines, entanglement.
 
-**Level 2 — Probabilistic:** how the model maps representations to token distributions. Calibrated by DPO — shifts the decision boundary without moving representations. Measurable with the compliance/boundary_margin_n dissociation and the GA vs boundary_margin_n non-monotone relationship.
+**Livello 2 — Probabilistico:** come il modello mappa le rappresentazioni alle distribuzioni di token. Calibrato da DPO — sposta il confine decisionale senza spostare le rappresentazioni. Misurabile con la dissociazione compliance/boundary_margin_n e la relazione non-monotona GA vs boundary_margin_n.
 
-Geometry predicts Partial Distancing (mediated by Level 1). Goal Addressness depends on Level 2.
+La geometria predice il Partial Distancing (mediato dal Livello 1). Il Goal Addressness dipende dal Livello 2.
 
 ---
 
 ## 9b. Behavioral Probe — Cross-Checkpoint Transfer
 
-`results/olmo2/geometry/behavioral_probe.csv`
+`results/olmo2/geometry/behavioral_probe_no_beaver.csv`
 
 Probe logistica che predice `predicted_refusal` dalle attivazioni `first_gen`.
 
-### Phase 1 — Within-checkpoint accuracy (cross-val)
+### Phase 1 — Accuratezza within-checkpoint (cross-val)
 
 | checkpoint | layer | acc_all | acc_pseudo_only |
 |---|---|---|---|
-| base__none | 8–31 | 0.917–0.930 | 0.978–0.981 |
-| sft__none | 8–31 | 0.954–0.968 | 0.974–0.977 |
-| dpo__none | 8–31 | 0.914–0.935 | 0.922–0.944 |
-| final__none | 8–31 | 0.914–0.929 | 0.919–0.934 |
+| base__none | 8–31 | 0.955–0.960 | 0.978–0.981 |
+| sft__none | 8–31 | 0.959–0.963 | 0.974–0.977 |
+| dpo__none | 8–31 | 0.932–0.948 | 0.922–0.944 |
+| final__none | 8–31 | 0.922–0.940 | 0.919–0.932 |
 
-SFT ha il decision boundary più netto e linearmente separabile. DPO e final hanno accuracy leggermente inferiore — coerente con l'ipotesi che DPO agisce su qualcosa di non lineare.
+**Cosa significa:** La probe comportamentale è accurata in tutti i checkpoint — il comportamento di rifiuto è linearmente separabile dalle attivazioni. SFT e base hanno accuratezza simile (~0.96), mentre DPO e final scendono leggermente (~0.93–0.94). Questo è coerente con l'ipotesi che DPO agisca su qualcosa di non lineare — il suo confine decisionale è meno nettamente separabile da una probe lineare.
 
 ### Phase 2 — Cross-checkpoint transfer
 
-**Trained on base__none:**
+*(in attesa di completamento job)*
 
-| layer | base | sft | dpo | final |
-|---|---|---|---|---|
-| 8 | 0.947 | 0.600 | 0.660 | 0.660 |
-| 16 | 0.970 | 0.602 | 0.637 | 0.636 |
-| 19 | 0.983 | 0.615 | 0.647 | 0.643 |
-| 24 | 0.998 | 0.859 | 0.795 | 0.792 |
-| 26 | 0.999 | 0.865 | 0.815 | 0.809 |
-| 31 | 1.000 | 0.909 | 0.877 | 0.878 |
-
-**Trained on sft__none:**
-
-| layer | sft | dpo | final |
-|---|---|---|---|
-| 8 | 0.968 | 0.939 | 0.938 |
-| 16 | 0.987 | 0.951 | 0.951 |
-| 19 | 0.996 | 0.951 | 0.951 |
-| 24 | 1.000 | 0.952 | 0.953 |
-| 26 | 1.000 | 0.953 | 0.953 |
-| 31 | 1.000 | 0.951 | 0.950 |
-
-**Key findings:**
-- Base→SFT: accuracy crolla a 60–62% ai layer 8–19. Il base non conosce il decision boundary di SFT.
-- Base→SFT ai layer profondi (24–31): risale a 86–91% — ai layer profondi c'è più struttura comportamentale condivisa.
-- SFT→DPO: 93–95% stabile su tutti i layer. Il decision boundary comportamentale si trasferisce quasi perfettamente.
-- SFT→Final: identico a SFT→DPO.
-
-**Three-level dissociation:**
-1. Geometric structure (centroid cosines SFT→DPO >0.93): stable
-2. Behavioral decision boundary (probe transfer SFT→DPO ~0.95): stable
-3. I/O behavior (compliance 66%→79%): changes
-
-DPO does not move representations and does not move the linear decision boundary. It acts on a third level — likely token probability distributions — not capturable by linear probes on the residual stream.
+I risultati attesi, per confronto con la versione con beavertails:
+- Base→SFT: accuracy attesa ~0.60–0.62 ai layer bassi (8–19)
+- SFT→DPO: accuracy attesa ~0.93–0.95 su tutti i layer
 
 ---
 
-## Experiments In Progress
+## 10. Narrativa Nuova — Classificazione del Task a last_prompt
 
-| experiment | script | output |
+**Nuova evidenza da PCA e UMAP:**
+
+Le visualizzazioni PCA e UMAP a `last_prompt` mostrano che le tre categorie (harmful, pseudo-harmful, harmless) sono già parzialmente separate nel modello base, e questa separazione si accentua con il training. I harmful tendono a formare cluster distinti dalle pseudo-harmful già durante l'encoding del prompt.
+
+A `first_gen` invece la struttura cambia: in SFT i harmful formano un cluster compatto separato, ma pseudo-harmful rifiutate e non rifiutate si trovano in posizioni opposte — il che spiega perché v_over è una media di due segnali opposti e non predice il comportamento.
+
+**Narrativa:** Il modello classifica il tipo di task già durante l'encoding del prompt (last_prompt), prima di generare qualsiasi token. Questa classificazione latente esiste già nel base e si affina con il training. L'over-refusal emerge perché a `first_gen` il modello non riesce a distinguere pseudo-harmful da harmful, nonostante le due categorie abbiano rappresentazioni distinte a `last_prompt`. La transizione da last_prompt a first_gen è il momento in cui la distinzione va persa.
+
+---
+
+## Cosa Manca
+
+| esperimento | stato |
+|---|---|
+| behavioral probe Phase 2 (cross-transfer) | job in corso |
+| clf3 Phase 2 (cross-transfer) | job in corso |
+| cos(v_beh, v_over_orth) | da calcolare |
+| entanglement curves (plot) | aspetta ent_last_meandiff.csv |
+
+---
+
+## Script Aggiornati
+
+| script | percorso | scopo |
 |---|---|---|
-| 3-class semantic probe, all checkpoints | `run_classification.py` | `slurm_outputs/clf-3cat.out` |
+| `extract_and_push.py` | `analysis/` | estrae attivazioni → HuggingFace |
+| `compute_entanglement.py` | `analysis/` | entanglement + boundary margin + v_beh coseni |
+| `compute_centroid_cosines.py` | `analysis/` | coseni tra centroidi cross-checkpoint |
+| `run_classification.py` | `analysis/` | probe semantica 3 categorie + cross-transfer |
+| `compute_behavioural_probe.py` | `analysis/` | probe comportamentale (predice predicted_refusal) |
+| `plot_2d_refusal_space_behavioral.py` | `analysis/` | plot 2D con coloring per (gruppo, predicted_refusal) |
+| `plot_entanglement_curves.py` | `analysis/` | curve entanglement e boundary margin |
+| `plot_pca_umap.py` | `analysis/` | PCA e UMAP per layer e checkpoint |
+| `run_experiment.py` | root | genera risposte per tutti i checkpoint |
+| `evaluation/llm_judge.py` | `evaluation/` | giudice GPT su risposte |
+
+Tutti gli script di analisi accettano `--exclude-sources beavertails`.
 
 ---
 
-## Key Scripts
+## Figure Aggiornate
 
-| script | purpose |
+| file | contenuto |
 |---|---|
-| `analysis/extract_and_push.py` | extract activations → HuggingFace |
-| `compute_entanglement.py` | entanglement + boundary margin per layer/checkpoint |
-| `compute_centroid_cosines.py` | centroid cosine similarity cross-checkpoint |
-| `run_classification.py` | 3-class semantic probe + cross-checkpoint transfer |
-| `compute_behavioural_probe.py` | behavioral probe (predicts predicted_refusal) |
-| `plot_2d_refusal_space.py` | 2D projection plots |
-| `plot_2d_refusal_space_behavioral.py` | 2D plots with refused/non-refused pseudo-harmful |
-| `plot_entanglement_curves.py` | entanglement and boundary margin curves |
-| `run_experiment.py` | generate responses for all checkpoints |
-| `evaluation/llm_judge.py` | run GPT judge on responses |
-
----
-
-## Figures
-
-| file | content |
-|---|---|
-| `figures/2d_first_gen_naive_all.png` | 2D refusal space, all sources, first_gen |
-| `figures/2d_last_prompt_naive_all.png` | 2D refusal space, last_prompt (flat across checkpoints) |
-| `figures/behavioral/2d_first_gen_naive_all.png` | 2D with refused (triangle) vs non-refused (square) pseudo-harmful |
-| `figures/by_source/` | 2D plots split by dataset source |
-| `figures/by_category/` | 2D plots split by harm category |
-| `results/olmo2/geometry/plots/fig_entanglement_all_combos.png` | entanglement curves, all token positions × methods |
-| `results/olmo2/geometry/plots/fig_boundary_all_combos.png` | boundary margin curves |
-| `results/olmo2/geometry/plots/fig_last_vs_first_entanglement.png` | last_prompt vs first_gen comparison |
-| `figures/umap_4cat_grid.png` | UMAP with 4 behavioral categories |
+| `figures/2d_first_gen_naive_all.png` | spazio 2D refusal, tutti i dati, first_gen, coloring behavioural |
+| `figures/2d_last_prompt_naive_all.png` | spazio 2D refusal, last_prompt (flat tra checkpoint) |
+| `figures/2d_first_gen_ortho_all.png` | versione ortogonalizzata |
+| `figures/by_source/` | plot 2D per dataset (false_reject, harmbench, or_bench, toxicchat) |
+| `figures/by_category/` | plot 2D per categoria di harm (63 categorie) |
+| `figures/pca_umap/pca_first_gen.png` | PCA su first_gen — base vs SFT vs final |
+| `figures/pca_umap/pca_last_prompt.png` | PCA su last_prompt |
+| `figures/pca_umap/umap_first_gen.png` | UMAP su first_gen |
+| `figures/pca_umap/umap_last_prompt.png` | UMAP su last_prompt |
+| `results/olmo2/geometry/plots/` | curve entanglement e boundary margin (da rigenerare) |

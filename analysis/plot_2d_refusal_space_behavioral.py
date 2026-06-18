@@ -6,7 +6,8 @@ Proietta le attivazioni di OLMo2 su due direzioni:
   v_over = mean(h_pseudo)   - mean(h_harmless)   # over-refusal
 
 Produce un grid di scatter plot 2D (righe=layer, colonne=checkpoint).
-I colori rappresentano sempre i tre gruppi (harmful/pseudo_harm/harmless).
+I colori rappresentano sempre i tre gruppi (harmful/pseudo_harm/harmless),
+splittati per predicted_refusal cosi' da rendere palese il comportamento del modello.
 
 Modalita' di split delle figure:
   --split-by none      : una figura sola (comportamento originale)
@@ -24,6 +25,7 @@ Usage:
         [--layers 8 16 19 24 26 31]    \
         [--checkpoints base__none sft__none dpo__none final__none] \
         [--split-by none|source|category] \
+        [--exclude-sources beavertails]    \
         [--orthogonalize]              \
         [--sample 500]                 \
         [--output-dir figures/]
@@ -145,21 +147,22 @@ def project_2d(h, v_ref_hat, v_over_hat, cd_ref, cd_over, mu_harmless):
 # Colori e stili
 # ---------------------------------------------------------------------------
 
-GROUP_COLOR = {
-    "harmful":     "#e63946",
-    "pseudo_harm": "#f4a261",
-    "harmless":    "#457b9d",
+# Colori per (group, predicted_refusal)
+POINT_COLOR = {
+    ("harmful",     1): "#e63946",   # rosso vivo     — harmful rifiutato (corretto)
+    ("harmful",     0): "#ffb3b3",   # rosa chiaro    — harmful accettato (errore sicurezza)
+    ("pseudo_harm", 1): "#f4a261",   # arancione      — pseudo-harmful rifiutato (over-refusal)
+    ("pseudo_harm", 0): "#2a9d8f",   # verde          — pseudo-harmful accettato (corretto)
+    ("harmless",    1): "#9b2226",   # bordeaux       — harmless rifiutato (over-refusal grave)
+    ("harmless",    0): "#457b9d",   # blu            — harmless accettato (corretto)
 }
-GROUP_MARKER = {
+
+POINT_MARKER = {
     "harmful":     "x",
     "pseudo_harm": "^",
     "harmless":    "o",
 }
-GROUP_LABEL = {
-    "harmful":     "harmful",
-    "pseudo_harm": "pseudo-harmful",
-    "harmless":    "harmless",
-}
+
 CENTROID_STYLE = dict(s=130, edgecolors="black", linewidths=1.3, zorder=5)
 
 
@@ -255,41 +258,42 @@ def compute_projections_for_layer(df_ckpt, layer, position, orthogonalize, sampl
 
 
 # ---------------------------------------------------------------------------
-# Plot
+# Legenda
 # ---------------------------------------------------------------------------
 
 def make_legend_handles():
+    entries = [
+        ("harmful — rifiutato ✓",              ("harmful",     1), "x"),
+        ("harmful — accettato (miss)",          ("harmful",     0), "x"),
+        ("pseudo-harmful — rifiutato (over-r)", ("pseudo_harm", 1), "^"),
+        ("pseudo-harmful — accettato ✓",        ("pseudo_harm", 0), "^"),
+        ("harmless — rifiutato (over-r grave)", ("harmless",    1), "o"),
+        ("harmless — accettato ✓",              ("harmless",    0), "o"),
+    ]
     handles = []
-    for g in ["harmful", "harmless"]:
-        handles.append(plt.scatter(
-            [], [], color=GROUP_COLOR[g], marker=GROUP_MARKER[g],
-            alpha=0.7, s=30, label=GROUP_LABEL[g]
-        ))
-    handles.append(plt.scatter(
-        [], [], color="#f4a261", marker="^",
-        alpha=0.7, s=30, label="pseudo-harmful (rifiutato)"
-    ))
-    handles.append(plt.scatter(
-        [], [], color="#2a9d8f", marker="s",
-        alpha=0.7, s=30, label="pseudo-harmful (non rifiutato)"
-    ))
-    handles.append(plt.scatter(
-        [], [], color="gray", marker="*", s=80,
-        edgecolors="black", linewidths=1, label="centroide"
-    ))
+    for label, key, marker in entries:
+        handles.append(plt.scatter([], [], color=POINT_COLOR[key], marker=marker,
+                                   alpha=0.8, s=35, label=label))
+    # centroide
+    handles.append(plt.scatter([], [], color="gray", marker="*", s=80,
+                               edgecolors="black", linewidths=1, label="centroide"))
     return handles
 
 
+# ---------------------------------------------------------------------------
+# Plot
+# ---------------------------------------------------------------------------
+
 def plot_grid(
-    results,          # dict[(ckpt, layer)] -> output di compute_projections_for_layer
+    results,
     checkpoints,
     layers,
     orthogonalize,
     output_path,
     position,
-    subset_label,     # stringa descrittiva per il titolo (es. "source=or_bench")
-    subset_mask_fn,   # funzione(proj_df) -> boolean mask per filtrare i punti
-    excl_label="",    # stringa per il titolo che indica le source escluse
+    subset_label,
+    subset_mask_fn,
+    excl_label="",
 ):
     n_rows = len(layers)
     n_cols = len(checkpoints)
@@ -309,47 +313,48 @@ def plot_grid(
             data = results[key]
             proj = data["proj"]
 
-            # Applica il filtro subset ai punti (ma i centroidi rimangono globali)
             if subset_mask_fn is not None:
                 mask = subset_mask_fn(proj)
                 proj_show = proj[mask]
             else:
                 proj_show = proj
 
-            # Scatter per gruppo — punti esclusi dalle direzioni in grigio
+            # --- Scatter: split per (group, predicted_refusal) ---
             for group in ["harmless", "pseudo_harm", "harmful"]:
                 sub = proj_show[proj_show["group"] == group]
                 if len(sub) == 0:
                     continue
+
                 sub_in  = sub[~sub["excluded"]] if "excluded" in sub.columns else sub
                 sub_out = sub[sub["excluded"]]  if "excluded" in sub.columns else sub.iloc[0:0]
 
-                if group == "pseudo_harm" and "predicted_refusal" in sub_in.columns:
-                    refused = sub_in[sub_in["predicted_refusal"] == 1]
-                    not_refused = sub_in[sub_in["predicted_refusal"] == 0]
-                    if len(refused) > 0:
-                        ax.scatter(refused["x"], refused["y"],
-                                   color="#f4a261",
-                                   marker="^", alpha=0.5, s=18, linewidths=0.5)
-                    if len(not_refused) > 0:
-                        ax.scatter(not_refused["x"], not_refused["y"],
-                                   color="#2a9d8f",
-                                   marker="s", alpha=0.4, s=13, linewidths=0.5)
+                if "predicted_refusal" in sub_in.columns:
+                    for refused_val in [0, 1]:
+                        part = sub_in[sub_in["predicted_refusal"] == refused_val]
+                        if len(part) == 0:
+                            continue
+                        color = POINT_COLOR[(group, refused_val)]
+                        ax.scatter(part["x"], part["y"],
+                                   color=color,
+                                   marker=POINT_MARKER[group],
+                                   alpha=0.5, s=18, linewidths=0.5)
                 else:
                     if len(sub_in) > 0:
                         ax.scatter(sub_in["x"], sub_in["y"],
-                                   color=GROUP_COLOR[group],
-                                   marker=GROUP_MARKER[group],
+                                   color=POINT_COLOR[(group, 0)],
+                                   marker=POINT_MARKER[group],
                                    alpha=0.4, s=13, linewidths=0.5)
+
+                # Punti esclusi dalle direzioni → grigio
                 if len(sub_out) > 0:
                     ax.scatter(sub_out["x"], sub_out["y"],
                                color="gray",
-                               marker=GROUP_MARKER[group],
+                               marker=POINT_MARKER[group],
                                alpha=0.2, s=10, linewidths=0.5)
 
-            # Centroidi globali (stelle)
+            # Centroidi (stelle)
             for group, (cx, cy) in data["centroids"].items():
-                ax.scatter(cx, cy, color=GROUP_COLOR[group],
+                ax.scatter(cx, cy, color=POINT_COLOR[(group, 0)],
                            marker="*", **CENTROID_STYLE)
 
             ax.axhline(0, color="gray", lw=0.5, ls="--")
@@ -369,7 +374,6 @@ def plot_grid(
                         transform=ax.transAxes,
                         fontsize=6, ha="right", va="bottom", color="gray")
 
-            # Quanti punti mostrati
             ax.text(0.03, 0.97, f"n={len(proj_show)}",
                     transform=ax.transAxes,
                     fontsize=6, ha="left", va="top", color="gray")
@@ -381,7 +385,8 @@ def plot_grid(
     fig.suptitle(
         f"OLMo2 -- 2D refusal space  |  {subset_label}  |  {position}  |  {orth_label}{excl_note}\n"
         f"x = v_ref (harmful-harmless),  y = v_over (pseudo_harm-harmless)"
-        f"  [grigio = escluso dal calcolo direzioni]",
+        f"  [grigio = escluso dal calcolo direzioni]\n"
+        f"colori = (gruppo, predicted_refusal):  ✓ = corretto  |  over-r = over-refusal  |  miss = harmful accettato",
         fontsize=8, y=1.01
     )
     plt.tight_layout()
@@ -413,6 +418,11 @@ def main():
                         help="Source da escludere dal calcolo di v_ref e v_over "
                              "(es. --exclude-from-directions beavertails). "
                              "I punti vengono comunque plottati in grigio.")
+    parser.add_argument("--exclude-sources", nargs="*", default=None,
+                        metavar="SOURCE",
+                        help="Source da escludere completamente dal dataset "
+                             "(es. --exclude-sources beavertails). "
+                             "I punti non vengono ne' calcolati ne' plottati.")
     parser.add_argument("--orthogonalize", action="store_true")
     parser.add_argument("--sample",        type=int, default=None)
     parser.add_argument("--seed",          type=int, default=42)
@@ -423,7 +433,6 @@ def main():
     output_dir = Path(args.output_dir)
     token = load_hf_token(args.hf_token)
 
-    # Colonne extra da caricare in base al split
     extra_cols = ["category"] if args.split_by == "category" else []
 
     df_full = load_full_dataset(
@@ -435,9 +444,11 @@ def main():
 
     df_full["group"] = assign_group(df_full)
 
-    # -------------------------------------------------------------------
-    # Calcola proiezioni per ogni (checkpoint, layer) — una volta sola
-    # -------------------------------------------------------------------
+    if args.exclude_sources:
+        before = len(df_full)
+        df_full = df_full[~df_full["source"].isin(args.exclude_sources)].reset_index(drop=True)
+        print(f"[.] Escluse source {args.exclude_sources}: {before} -> {len(df_full)} righe")
+
     results = {}
     for ckpt in args.checkpoints:
         print(f"\n[.] Checkpoint: {ckpt}")
@@ -465,13 +476,10 @@ def main():
         print("\n[!] Nessun risultato calcolato.")
         return
 
-    # -------------------------------------------------------------------
-    # Determina i subset da plottare
-    # -------------------------------------------------------------------
     orth_tag = "_ortho" if args.orthogonalize else "_naive"
 
     if args.split_by == "none":
-        subsets = [("all", None)]  # nessun filtro
+        subsets = [("all", None)]
 
     elif args.split_by == "source":
         sources = sorted(df_full["source"].dropna().unique())
@@ -489,9 +497,6 @@ def main():
                    for c in categories]
         subsets = [("all_categories", None)] + subsets
 
-    # -------------------------------------------------------------------
-    # Genera un plot per ogni subset
-    # -------------------------------------------------------------------
     print(f"\n[.] Genero {len(subsets)} figure in '{output_dir}' ...")
     for label, mask_fn in subsets:
         safe_label = label.replace("=", "_").replace(" ", "_").replace("/", "-")

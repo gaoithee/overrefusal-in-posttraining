@@ -12,6 +12,7 @@ su due probe indipendenti.
 
 Usage:
     python compute_behavioral_probe.py
+    python compute_behavioral_probe.py --exclude-sources beavertails
     python compute_behavioral_probe.py --out results/olmo2/geometry/behavioral_probe.csv
 """
 
@@ -35,12 +36,35 @@ SAVE_DIR = Path("results/olmo2/classifiers")
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def load_checkpoint(hf_repo, ckpt, cols, token, exclude_sources=None):
+    """Carica un checkpoint e opzionalmente filtra le source."""
+    ds = load_dataset(
+        hf_repo,
+        data_files={"train": f"data/{ckpt}/*.parquet"},
+        split="train",
+        token=token,
+    )
+    available = [c for c in cols if c in ds.column_names]
+    df = ds.select_columns(available).to_pandas()
+    if exclude_sources:
+        before = len(df)
+        df = df[~df["source"].isin(exclude_sources)].reset_index(drop=True)
+        print(f"    [exclude] {ckpt}: {before} -> {len(df)} righe (rimosso {exclude_sources})")
+    return df
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hf-repo", default=HF_REPO)
     parser.add_argument("--layers", nargs="+", type=int, default=LAYERS)
     parser.add_argument("--out", default="results/olmo2/geometry/behavioral_probe.csv")
+    parser.add_argument("--exclude-sources", nargs="*", default=None,
+                        metavar="SOURCE",
+                        help="Source da escludere completamente "
+                             "(es. --exclude-sources beavertails)")
     args = parser.parse_args()
+
+    exclude = set(args.exclude_sources) if args.exclude_sources else None
 
     token = os.environ.get("HF_TOKEN") or open(
         os.path.expanduser("~/.hf_token")
@@ -58,13 +82,8 @@ def main():
 
     for ckpt in CHECKPOINTS:
         act_cols = [f"layer_{l}_first_gen" for l in args.layers]
-        ds = load_dataset(
-            args.hf_repo,
-            data_files={"train": f"data/{ckpt}/*.parquet"},
-            split="train",
-            token=token,
-        )
-        df = ds.select_columns(["label", "source", "predicted_refusal"] + act_cols).to_pandas()
+        base_cols = ["label", "source", "predicted_refusal"]
+        df = load_checkpoint(args.hf_repo, ckpt, base_cols + act_cols, token, exclude)
 
         # Subset pseudo-harmful only
         pseudo_mask = (df["label"] == 0) & (df["source"].isin(PSEUDO_SOURCES))
@@ -133,13 +152,11 @@ def main():
 
             for ckpt in test_ckpts:
                 col = f"layer_{l}_first_gen"
-                ds = load_dataset(
-                    args.hf_repo,
-                    data_files={"train": f"data/{ckpt}/*.parquet"},
-                    split="train",
-                    token=token,
+                df = load_checkpoint(
+                    args.hf_repo, ckpt,
+                    ["source", "predicted_refusal", col],
+                    token, exclude
                 )
-                df = ds.select_columns(["predicted_refusal", col]).to_pandas()
                 X = np.stack(df[col].values).astype(np.float32)
                 y = df["predicted_refusal"].values.astype(int)
                 acc = clf_train.score(X, y)

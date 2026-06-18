@@ -1,50 +1,48 @@
 #!/bin/bash
-# run_entanglement.sh
-# Calcola entanglement per tutte le combinazioni token_position x method
-# e produce i plot di confronto.
+#SBATCH --no-requeue
+#SBATCH --job-name="entanglement-no-beaver"
+#SBATCH --partition=Main
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=4:00:00
+#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --output=slurm_outputs/entanglement-no-beaver.out
 
-set -e
-cd /u/scandussio/overrefusal-in-posttraining
+cd /u/scandussio/overrefusal-in-posttraining || exit 1
+source .overenv/bin/activate
 
-GEO="results/olmo2/geometry"
-mkdir -p "$GEO"
+export HF_HOME=/share/ai-lab/scandussio/hf_cache
+export HF_TOKEN=$(cat ~/.hf_token)
 
-echo "=== [1/4] last_prompt x mean_diff ==="
-python compute_entanglement.py \
-    --token-position last_prompt \
-    --method mean_diff \
-    --out "$GEO/ent_last_meandiff.csv"
+echo "=== Start: $(date) ==="
 
-echo "=== [2/4] last_prompt x logistic ==="
-python compute_entanglement.py \
-    --token-position last_prompt \
-    --method logistic \
-    --out "$GEO/ent_last_logistic.csv"
-
-echo "=== [3/4] first_gen x mean_diff ==="
-python compute_entanglement.py \
+echo "[1/4] first_gen + mean_diff ..."
+python analysis/compute_entanglement.py \
     --token-position first_gen \
     --method mean_diff \
-    --out "$GEO/ent_first_meandiff.csv"
+    --exclude-sources beavertails \
+    --out results/olmo2/geometry/ent_first_meandiff.csv
 
-echo "=== [4/4] first_gen x logistic ==="
-python compute_entanglement.py \
+echo "[2/4] first_gen + logistic ..."
+python analysis/compute_entanglement.py \
     --token-position first_gen \
     --method logistic \
-    --out "$GEO/ent_first_logistic.csv"
+    --exclude-sources beavertails \
+    --out results/olmo2/geometry/ent_first_logistic.csv
 
-echo "=== Plot singolo (last_prompt x mean_diff) ==="
-python plot_entanglement_curves.py \
-    --csv "$GEO/ent_last_meandiff.csv" \
-    --out "$GEO/"
+echo "[3/4] last_prompt + mean_diff ..."
+python analysis/compute_entanglement.py \
+    --token-position last_prompt \
+    --method mean_diff \
+    --exclude-sources beavertails \
+    --out results/olmo2/geometry/ent_last_meandiff.csv
 
-echo "=== Plot confronto 4 combinazioni ==="
-python plot_entanglement_curves.py \
-    --csv-last-meandiff  "$GEO/ent_last_meandiff.csv" \
-    --csv-last-logistic  "$GEO/ent_last_logistic.csv" \
-    --csv-first-meandiff "$GEO/ent_first_meandiff.csv" \
-    --csv-first-logistic "$GEO/ent_first_logistic.csv" \
-    --out "$GEO/"
+echo "[4/4] last_prompt + logistic ..."
+python analysis/compute_entanglement.py \
+    --token-position last_prompt \
+    --method logistic \
+    --exclude-sources beavertails \
+    --out results/olmo2/geometry/ent_last_logistic.csv
 
-echo "=== Tutto fatto. File in $GEO/ ==="
-ls -lh "$GEO/"
+echo "=== Done: $(date) ==="

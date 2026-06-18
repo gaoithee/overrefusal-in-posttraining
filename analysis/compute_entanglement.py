@@ -15,16 +15,15 @@ Per ogni checkpoint e layer:
   entanglement      = cos(v_ref, f)
   boundary_margin   = mean projection of pseudo_harm onto v_ref minus midpoint
   boundary_margin_n = boundary_margin / cluster_distance
-                      (normalizzato per la distanza tra i due cluster)
-                      0 = al midpoint
-                     +1 = al centroide harmful
-                     -1 = al centroide harmless
-                     >1 = oltre il cluster harmful
+  v_beh  = mean(h_pseudo_refused) - mean(h_pseudo_not_refused)
+  cos_vbeh_vref  = cos(v_beh, v_ref)
+  cos_vbeh_vover = cos(v_beh, f)
 
 Uso:
     python compute_entanglement.py
     python compute_entanglement.py --token-position first_gen
     python compute_entanglement.py --method logistic
+    python compute_entanglement.py --exclude-sources beavertails
     python compute_entanglement.py --out results/olmo2/geometry/entanglement.csv
 """
 
@@ -107,20 +106,28 @@ def compute_geometry(
     h_harmful: np.ndarray,
     h_harmless: np.ndarray,
     h_pseudo: np.ndarray,
+    predicted_refusal_pseudo: np.ndarray | None = None,
     method: str = "mean_diff",
 ) -> dict:
+
+    empty = {
+        "entanglement":      None,
+        "boundary_margin":   None,
+        "boundary_margin_n": None,
+        "cluster_distance":  None,
+        "acc_ref":           None,
+        "acc_over":          None,
+        "cos_vbeh_vref":     None,
+        "cos_vbeh_vover":    None,
+        "n_pseudo_refused":  None,
+        "n_pseudo_accepted": None,
+        "n_harmful":         len(h_harmful),
+        "n_harmless":        len(h_harmless),
+        "n_pseudo":          len(h_pseudo),
+    }
+
     if len(h_harmful) == 0 or len(h_harmless) == 0 or len(h_pseudo) == 0:
-        return {
-            "entanglement":      None,
-            "boundary_margin":   None,
-            "boundary_margin_n": None,
-            "cluster_distance":  None,
-            "acc_ref":           None,
-            "acc_over":          None,
-            "n_harmful":         len(h_harmful),
-            "n_harmless":        len(h_harmless),
-            "n_pseudo":          len(h_pseudo),
-        }
+        return empty
 
     # true refusal direction: harmful vs harmless
     v_ref, acc_ref = fit_direction(h_harmful, h_harmless, method)
@@ -132,31 +139,49 @@ def compute_geometry(
     entanglement = float(np.dot(v_ref, f))
 
     # projections onto v_ref
-    proj_harm    = h_harmful  @ v_ref
+    proj_harm     = h_harmful  @ v_ref
     proj_harmless = h_harmless @ v_ref
-    proj_pseudo  = h_pseudo   @ v_ref
+    proj_pseudo   = h_pseudo   @ v_ref
 
-    # midpoint between the two cluster means
     mu_harmful  = proj_harm.mean()
     mu_harmless = proj_harmless.mean()
     midpoint    = (mu_harmful + mu_harmless) / 2.0
 
-    # raw boundary margin
-    boundary_margin = float((proj_pseudo - midpoint).mean())
-
-    # cluster distance (harmful mean - harmless mean, along v_ref)
-    # always positive because v_ref points from harmless to harmful
+    boundary_margin  = float((proj_pseudo - midpoint).mean())
     cluster_distance = float(mu_harmful - mu_harmless)
 
-    # normalized boundary margin:
-    #   0   = pseudo at midpoint
-    #  +0.5 = halfway between midpoint and harmful centroid
-    #  +1   = at harmful centroid
-    #  -1   = at harmless centroid
     if abs(cluster_distance) > 1e-12:
         boundary_margin_n = boundary_margin / (cluster_distance / 2.0)
     else:
         boundary_margin_n = None
+
+    # -------------------------------------------------------------------
+    # v_beh: direzione comportamentale sulle pseudo-harmful
+    # -------------------------------------------------------------------
+    cos_vbeh_vref  = None
+    cos_vbeh_vover = None
+    n_refused  = None
+    n_accepted = None
+
+    if predicted_refusal_pseudo is not None:
+        refused_mask = predicted_refusal_pseudo == 1
+        h_refused  = h_pseudo[refused_mask]
+        h_accepted = h_pseudo[~refused_mask]
+        n_refused  = int(refused_mask.sum())
+        n_accepted = int((~refused_mask).sum())
+
+        if n_refused >= 5 and n_accepted >= 5:
+            v_beh = h_refused.mean(0) - h_accepted.mean(0)
+            norm_beh = np.linalg.norm(v_beh)
+            if norm_beh > 1e-12:
+                v_beh = v_beh / norm_beh
+                cos_vbeh_vref  = float(np.dot(v_beh, v_ref))
+                cos_vbeh_vover = float(np.dot(v_beh, f))
+        else:
+            logger.warning(
+                "Troppo pochi esempi refused=%d / accepted=%d per calcolare v_beh",
+                n_refused, n_accepted,
+            )
 
     return {
         "entanglement":      entanglement,
@@ -165,6 +190,10 @@ def compute_geometry(
         "cluster_distance":  cluster_distance,
         "acc_ref":           acc_ref,
         "acc_over":          acc_over,
+        "cos_vbeh_vref":     cos_vbeh_vref,
+        "cos_vbeh_vover":    cos_vbeh_vover,
+        "n_pseudo_refused":  n_refused,
+        "n_pseudo_accepted": n_accepted,
         "n_harmful":         len(h_harmful),
         "n_harmless":        len(h_harmless),
         "n_pseudo":          len(h_pseudo),
@@ -186,6 +215,11 @@ def main():
     parser.add_argument("--n-samples", type=int, default=None,
                         help="Max samples per group per checkpoint (None = all)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--exclude-sources", nargs="*", default=None,
+                        metavar="SOURCE",
+                        help="Source da escludere completamente dal dataset "
+                             "(es. --exclude-sources beavertails). "
+                             "Influenza sia il calcolo delle direzioni che v_beh.")
     args = parser.parse_args()
 
     logger.info("Loading dataset from %s ...", args.hf_repo)
@@ -194,11 +228,50 @@ def main():
     ).read().strip()
 
     from datasets import load_dataset
-    ds = load_dataset(args.hf_repo, split="train", token=token)
-    df = ds.to_pandas()
 
-    layer_cols = [c for c in df.columns if c.startswith("layer_") and args.token_position in c]
-    layers = sorted({int(c.split("_")[1]) for c in layer_cols})
+    # Carica checkpoint per checkpoint per evitare CastError da schema misto
+    # (i checkpoint mistral_safety hanno 7 colonne post_instr, gli altri 3)
+    base_cols = ["label", "source", "checkpoint", "predicted_refusal"]
+    dfs = []
+    layers = None
+
+    for ckpt in CHECKPOINT_ORDER:
+        try:
+            ds = load_dataset(
+                args.hf_repo,
+                data_files={"train": f"data/{ckpt}/*.parquet"},
+                split="train",
+                token=token,
+            )
+            act_cols = [c for c in ds.column_names
+                        if c.startswith("layer_") and args.token_position in c]
+            available = [c for c in base_cols + act_cols if c in ds.column_names]
+            df_ckpt = ds.select_columns(available).to_pandas()
+            dfs.append(df_ckpt)
+
+            if layers is None:
+                layers = sorted({int(c.split("_")[1]) for c in act_cols})
+
+            logger.info("[%s] %d righe", ckpt, len(df_ckpt))
+        except Exception as e:
+            logger.warning("Skipping %s: %s", ckpt, e)
+
+    if not dfs:
+        logger.error("Nessun checkpoint caricato.")
+        return
+
+    df = pd.concat(dfs, ignore_index=True)
+    logger.info("Dataset totale: %d righe", len(df))
+
+    # Esclusione source completa
+    if args.exclude_sources:
+        before = len(df)
+        df = df[~df["source"].isin(args.exclude_sources)].reset_index(drop=True)
+        logger.info(
+            "Escluse source %s: %d -> %d righe",
+            args.exclude_sources, before, len(df),
+        )
+
     logger.info("Layers: %s | position: %s", layers, args.token_position)
 
     # assign groups
@@ -238,7 +311,16 @@ def main():
             h_harmless = np.stack(g_harmless[col].values).astype(np.float32)
             h_pseudo   = np.stack(g_pseudo[col].values).astype(np.float32)
 
-            geo = compute_geometry(h_harmful, h_harmless, h_pseudo, method=args.method)
+            # predicted_refusal per le pseudo-harmful (per v_beh)
+            pred_ref_pseudo = None
+            if "predicted_refusal" in g_pseudo.columns:
+                pred_ref_pseudo = g_pseudo["predicted_refusal"].values.astype(int)
+
+            geo = compute_geometry(
+                h_harmful, h_harmless, h_pseudo,
+                predicted_refusal_pseudo=pred_ref_pseudo,
+                method=args.method,
+            )
 
             rows.append({
                 "checkpoint":     ckpt,
@@ -264,15 +346,25 @@ def main():
     print("\n=== Mean boundary_margin_n per checkpoint (across layers) ===")
     print(result_df.groupby("checkpoint")["boundary_margin_n"].mean().reindex(CHECKPOINT_ORDER).round(4).to_string())
 
+    print("\n=== cos(v_beh, v_ref) per checkpoint (across layers) ===")
+    print(result_df.groupby("checkpoint")["cos_vbeh_vref"].mean().reindex(CHECKPOINT_ORDER).round(4).to_string())
+
+    print("\n=== cos(v_beh, v_over) per checkpoint (across layers) ===")
+    print(result_df.groupby("checkpoint")["cos_vbeh_vover"].mean().reindex(CHECKPOINT_ORDER).round(4).to_string())
+
     print("\n=== boundary_margin_n per layer (base__none vs sft__none) ===")
     pivot = result_df[result_df["checkpoint"].isin(["base__none", "sft__none"])].pivot(
         index="layer", columns="checkpoint", values="boundary_margin_n"
     )
     print(pivot.round(4).to_string())
 
-    print("\n=== cluster_distance per layer (base__none) ===")
-    sub = result_df[result_df["checkpoint"] == "base__none"][["layer", "cluster_distance"]]
-    print(sub.set_index("layer").round(4).to_string())
+    print("\n=== cos(v_beh, v_ref) vs cos(v_beh, v_over) — sft/dpo/final per layer ===")
+    for ckpt in ["sft__none", "dpo__none", "final__none"]:
+        sub = result_df[result_df["checkpoint"] == ckpt][
+            ["layer", "cos_vbeh_vref", "cos_vbeh_vover"]
+        ].set_index("layer")
+        print(f"\n  {ckpt}")
+        print(sub.round(4).to_string())
 
 
 if __name__ == "__main__":
