@@ -51,11 +51,13 @@ Beavertails conteneva molti esempi etichettati come `harmful` che il modello acc
 
 `results/olmo2/geometry/ent_last_meandiff.csv`
 
-L'entanglement a last_prompt è quasi zero e stabile in tutti i checkpoint (≈ -0.01 a +0.04). Il boundary_margin_n è vicino a zero.
+L'entanglement a `last_prompt` è quasi zero in tutti i checkpoint (≈ -0.01 a +0.04) e non cambia con il training.
 
-**Cosa significa:** Il modello codifica i prompt in modo simile a prescindere dalla categoria (harmful, pseudo-harmful, harmless) quando elabora l'ultimo token del prompt. Il training non modifica questa codifica. Questo è il punto di partenza per la narrativa sulla dissociazione last_prompt/first_gen.
+Questo non significa che le tre categorie siano indistinguibili — le visualizzazioni PCA e UMAP mostrano che una struttura a tre categorie esiste già nel base. Significa invece una cosa più precisa: **la direzione lungo cui harmful si separa da harmless (v_ref) e la direzione lungo cui pseudo-harmful si separa da harmless (v_over) sono quasi ortogonali**. Il modello distingue le categorie, ma le distingue lungo assi che non hanno a che fare con il rifiuto.
 
-**Però:** Le visualizzazioni PCA e UMAP a last_prompt mostrano che una struttura a tre categorie *esiste già* — le tre nuvole sono parzialmente separate anche nel modello base. Questo significa che il modello riconosce qualcosa di diverso nei tre tipi di prompt già durante l'encoding, ma questa distinzione non si traduce in entanglement lungo v_ref/v_over perché le direzioni di separazione non coincidono con quelle che guidano il rifiuto.
+In altre parole: a `last_prompt` il modello ha già una rappresentazione ricca del tipo di prompt che sta ricevendo, ma quella rappresentazione non è organizzata secondo la logica "questo va rifiutato / questo no". È solo dopo aver iniziato a generare (`first_gen`) che la logica del rifiuto diventa dominante — e lì l'entanglement sale a 0.60–0.75, il che significa che le due direzioni convergono verso la stessa zona dello spazio.
+
+**Questo è il fulcro della narrativa:** la distinzione tra categorie esiste già durante l'encoding del prompt, ma viene sovrascritta al momento della generazione, quando il modello proietta tutto lungo la dimensione del rifiuto.
 
 ---
 
@@ -70,9 +72,13 @@ L'entanglement a last_prompt è quasi zero e stabile in tutti i checkpoint (≈ 
 | dpo__none | 0.46 | 0.64 | 0.71 | 0.68 |
 | final__none | 0.46 | 0.63 | 0.70 | 0.67 |
 
-**Cosa significa:** Senza beavertails, v_ref e v_over sono *allineati*, non ortogonali. SFT aumenta questo allineamento (da ~0.36 a ~0.67 in media), e DPO/final lo mantengono stabile. In pratica: dopo SFT, la direzione "questa domanda è pericolosa" e la direzione "questa domanda sembra pericolosa ma non lo è" puntano nella stessa zona dello spazio — il modello non le distingue geometricamente.
+**Cosa significa:** A `first_gen` — il primo token generato — v_ref e v_over sono *allineati*, non ortogonali. Questo è il contrario di quello che succede a last_prompt. SFT aumenta questo allineamento significativamente (da ~0.36 a ~0.67 in media), e DPO/final lo mantengono stabile senza modificarlo ulteriormente.
 
-**Differenza rispetto ai risultati originali con beavertails:** Prima l'entanglement in SFT/DPO era ~0.01-0.14 (quasi ortogonale). Quel risultato era un artefatto delle etichette rumorose di beavertails che tiravano v_ref in una direzione artificiale. I valori attuali (0.60-0.75) riflettono la struttura reale.
+In termini concreti: dopo SFT, quando il modello genera il primo token di risposta, la direzione "questa domanda è genuinamente pericolosa" (v_ref) e la direzione "questa domanda sembra pericolosa ma non lo è" (v_over) puntano nella stessa zona dello spazio. Il modello non le distingue più geometricamente in quel momento — è qui che si radica l'over-refusal.
+
+Il pattern per layer è interessante: l'entanglement cresce con la profondità fino al layer 26 (picco ~0.75 in SFT), poi scende leggermente al layer 31. Questo suggerisce che la confusione tra le due direzioni si accumula nei layer intermedi e viene parzialmente risolta negli ultimi layer — ma non abbastanza da evitare l'over-refusal.
+
+**Differenza rispetto ai risultati originali con beavertails:** Prima l'entanglement in SFT/DPO era ~0.01-0.14 (quasi ortogonale). Quel risultato era un artefatto delle etichette rumorose di beavertails che tiravano v_ref in una direzione artificiale. I valori attuali (0.60-0.75) riflettono la struttura reale dello spazio delle attivazioni.
 
 ---
 
